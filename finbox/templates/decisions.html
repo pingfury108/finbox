@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}AI 决策 - finbox{% endblock %}
+{% block content %}
+<h2>AI 决策日志</h2>
+<form method="post" action="/decisions/run" style="margin-bottom:16px">
+  <button type="submit">立即决策一轮</button>
+  <span style="color:#9aa0a6;font-size:13px">非交易时段也可触发，成交价=最近收盘价</span>
+</form>
+{% for d in decisions %}
+<div class="card" style="margin-bottom:16px">
+  <div>
+    <span class="badge">#{{ d.id }}</span>
+    <span class="badge">{{ d.status }}</span>
+    <span style="color:#9aa0a6">{{ d.ts.strftime("%Y-%m-%d %H:%M") }} · {{ d.model }}</span>
+  </div>
+  <p style="margin:8px 0 0">{{ d.note }}</p>
+  <details><summary>输入上下文</summary><pre>{{ d.context }}</pre></details>
+  <details><summary>AI 原始输出</summary><pre>{{ d.raw_response }}</pre></details>
+  {% set rs = review_map.get(d.id) %}
+  {% if rs %}
+  <details open><summary>复盘结果</summary>
+    {% for r in rs %}
+    <pre>{{ r.days_after }} 天后 ({{ r.ts.strftime("%m-%d") }}): 浮动 {{ "%+.2f"|format(r.pnl or 0) }} 元
+{{ r.summary }}</pre>
+    {% endfor %}
+  </details>
+  {% endif %}
+</div>
+{% else %}
+<p>暂无决策记录。点上方按钮手动触发一轮，或等待交易时段自动决策（需配置 LLM_API_KEY）</p>
+{% endfor %}
+{% endblock %}

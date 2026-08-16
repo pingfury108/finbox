@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="cards">
+  <div class="card"><div class="label">总资产</div><div class="value">{{ "%.2f"|format(total) }}</div></div>
+  <div class="card"><div class="label">可用现金</div><div class="value">{{ "%.2f"|format(cash) }}</div></div>
+  <div class="card"><div class="label">持仓市值</div><div class="value">{{ "%.2f"|format(market_value) }}</div></div>
+  <div class="card">
+    <div class="label">累计收益率</div>
+    {% set ret = (total / initial - 1) * 100 %}
+    <div class="value {{ 'up' if ret >= 0 else 'down' }}">{{ "%+.2f"|format(ret) }}%</div>
+  </div>
+  <div class="card"><div class="label">已存行情条数</div><div class="value">{{ quote_count }}</div></div>
+</div>
+
+<h2>当前持仓</h2>
+<table>
+  <tr><th>代码</th><th>名称</th><th>数量</th><th>成本价</th><th>最新价</th><th>浮动盈亏</th></tr>
+  {% for p in positions %}
+  <tr>
+    <td>{{ p.symbol }}</td><td>{{ p.name }}</td><td>{{ p.quantity }}</td>
+    <td>{{ "%.2f"|format(p.avg_cost) }}</td>
+    <td>{{ "%.2f"|format(p.price) if p.price else "-" }}</td>
+    <td class="{{ 'up' if (p.pnl_pct or 0) >= 0 else 'down' }}">
+      {{ ("%+.2f%%"|format(p.pnl_pct)) if p.pnl_pct is not none else "-" }}
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="6">空仓</td></tr>
+  {% endfor %}
+</table>
+
+<h2>收益曲线（每日收盘快照）</h2>
+{% if snaps %}
+<table>
+  <tr><th>日期</th><th>总资产</th><th>收益率</th></tr>
+  {% for s in snaps %}
+  <tr>
+    <td>{{ s.ts.strftime("%Y-%m-%d %H:%M") }}</td>
+    <td>{{ "%.2f"|format(s.total_asset) }}</td>
+    {% set r = (s.total_asset / initial - 1) * 100 %}
+    <td class="{{ 'up' if r >= 0 else 'down' }}">{{ "%+.2f"|format(r) }}%</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p>暂无快照（每日 15:05 自动生成）</p>
+{% endif %}
+
+<h2>最近交易</h2>
+<table>
+  <tr><th>时间</th><th>方向</th><th>代码</th><th>名称</th><th>价格</th><th>数量</th><th>金额</th></tr>
+  {% for t in trades %}
+  <tr>
+    <td>{{ t.ts.strftime("%m-%d %H:%M") }}</td>
+    <td class="{{ 'up' if t.side == 'BUY' else 'down' }}">{{ t.side }}</td>
+    <td>{{ t.symbol }}</td><td>{{ t.name }}</td>
+    <td>{{ "%.2f"|format(t.price) }}</td><td>{{ t.quantity }}</td>
+    <td>{{ "%.2f"|format(t.amount) }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="7">暂无交易</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}
