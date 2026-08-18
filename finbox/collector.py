@@ -1,4 +1,4 @@
-"""行情采集：分钟级落库。东财为主，失败自动降级新浪，带重试"""
+"""行情采集：分钟级落库。东财/新浪双源互备，源记忆 + 连接池 + 重试"""
 
 import logging
 import time
@@ -12,10 +12,14 @@ from .models import DailyBar, Quote
 
 logger = logging.getLogger(__name__)
 
-_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/126.0 Safari/537.36",
-    "Referer": "https://finance.sina.com.cn",
-}
+# 连接池：复用 TCP/TLS，降低被风控概率也更快
+_http = requests.Session()
+_http.headers.update(
+    {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/126.0 Safari/537.36",
+        "Referer": "https://finance.sina.com.cn",
+    }
+)
 
 
 def _prefixed(symbol: str) -> str:
@@ -27,7 +31,8 @@ def _prefixed(symbol: str) -> str:
     return "sz" + symbol
 
 
-def _retry(fn, tries: int = 3, delay: float = 2.0):
+def _retry(fn, tries: int = 2, delay: float = 2.0):
+    """akshare 内部自带重试，外层 tries 不宜再大，避免故障时长时间阻塞调度"""
     for i in range(tries):
         try:
             return fn()
@@ -37,17 +42,35 @@ def _retry(fn, tries: int = 3, delay: float = 2.0):
             time.sleep(delay * (i + 1))
 
 
+def _with_failover(source_attr: str, fetchers: dict, label: str):
+    """双源执行框架：记住上次成功的源，失败切换。返回 (结果, 源名)"""
+    global _spot_source, _hist_source
+    remembered = globals()[source_attr]
+    order = list(fetchers) if remembered == list(fetchers)[0] else list(fetchers)[::-1]
+    for src in order:
+        try:
+            result = _retry(fetchers[src])
+            globals()[source_attr] = src
+            return result, src
+        except Exception:
+            logger.warning("%s %s failed, trying next source", src, label)
+    raise RuntimeError(f"all {label} sources failed")
+
+
 # ---------- 实时快照 ----------
+
+_spot_source = "eastmoney"
+
 
 def collect_quotes(session: Session, symbols: list[str]) -> int:
     if not symbols:
         return 0
-    try:
-        count = _retry(lambda: _collect_eastmoney(session, symbols))
-    except Exception:
-        logger.warning("eastmoney spot failed, fallback to sina")
-        count = _retry(lambda: _collect_sina(session, symbols))
-    logger.info("collected %d quotes", count)
+    fetchers = {
+        "eastmoney": lambda: _collect_eastmoney(session, symbols),
+        "sina": lambda: _collect_sina(session, symbols),
+    }
+    count, src = _with_failover("_spot_source", fetchers, "spot")
+    logger.info("collected %d quotes via %s", count, src)
     return count
 
 
@@ -73,13 +96,10 @@ def _collect_eastmoney(session: Session, symbols: list[str]) -> int:
     return count
 
 
-def _collect_sina(session: Session, symbols: list[str]) -> int:
-    codes = ",".join(_prefixed(s) for s in symbols)
-    r = requests.get(f"https://hq.sinajs.cn/list={codes}", headers=_HEADERS, timeout=10)
-    r.encoding = "gbk"
-    now = datetime.now()
-    count = 0
-    for line in r.text.strip().splitlines():
+def _parse_sina_lines(text: str) -> list[dict]:
+    """解析新浪批量行情响应"""
+    rows = []
+    for line in text.strip().splitlines():
         head, _, payload = line.partition('="')
         f = payload.rstrip('";\n').split(",")
         if len(f) < 32 or not f[3]:
@@ -87,15 +107,36 @@ def _collect_sina(session: Session, symbols: list[str]) -> int:
         cur, prev = float(f[3]), float(f[2])
         if cur == 0:  # 停牌
             continue
+        rows.append(
+            {
+                "symbol": head.removeprefix("var hq_str_")[-6:],
+                "name": f[0],
+                "price": cur,
+                "pct": round((cur / prev - 1) * 100, 2) if prev else None,
+                "volume": _f(f[8]),
+                "amount": _f(f[9]),
+                "time": f"{f[30]} {f[31]}",
+            }
+        )
+    return rows
+
+
+def _collect_sina(session: Session, symbols: list[str]) -> int:
+    codes = ",".join(_prefixed(s) for s in symbols)
+    r = _http.get(f"https://hq.sinajs.cn/list={codes}", timeout=10)
+    r.encoding = "gbk"
+    now = datetime.now()
+    count = 0
+    for row in _parse_sina_lines(r.text):
         try:
-            ts = datetime.strptime(f"{f[30]} {f[31]}", "%Y-%m-%d %H:%M:%S")
+            ts = datetime.strptime(row["time"], "%Y-%m-%d %H:%M:%S")
         except ValueError:
             ts = now
         session.add(
             Quote(
-                symbol=head.removeprefix("var hq_str_")[-6:], name=f[0], ts=ts,
-                price=cur, pct_change=round((cur / prev - 1) * 100, 2) if prev else None,
-                volume=_f(f[8]), amount=_f(f[9]),
+                symbol=row["symbol"], name=row["name"], ts=ts,
+                price=row["price"], pct_change=row["pct"],
+                volume=row["volume"], amount=row["amount"],
             )
         )
         count += 1
@@ -105,19 +146,15 @@ def _collect_sina(session: Session, symbols: list[str]) -> int:
 def live_quote(symbol: str) -> dict | None:
     """实时查询任意一只股票（新浪源，不落库）"""
     try:
-        r = requests.get(
-            f"https://hq.sinajs.cn/list={_prefixed(symbol)}", headers=_HEADERS, timeout=8
-        )
+        r = _http.get(f"https://hq.sinajs.cn/list={_prefixed(symbol)}", timeout=8)
         r.encoding = "gbk"
-        _, _, payload = r.text.strip().partition('="')
-        f = payload.rstrip('";\n').split(",")
-        if len(f) < 32 or not f[3] or float(f[3]) == 0:
+        rows = _parse_sina_lines(r.text)
+        if not rows:
             return None
-        cur, prev = float(f[3]), float(f[2])
+        row = rows[0]
         return {
-            "name": f[0], "price": cur,
-            "pct": round((cur / prev - 1) * 100, 2) if prev else None,
-            "volume": _f(f[8]), "amount": _f(f[9]), "time": f"{f[30]} {f[31]}",
+            "name": row["name"], "price": row["price"], "pct": row["pct"],
+            "volume": row["volume"], "amount": row["amount"], "time": row["time"],
         }
     except Exception:
         logger.exception("live_quote failed for %s", symbol)
@@ -126,20 +163,23 @@ def live_quote(symbol: str) -> dict | None:
 
 # ---------- 日线历史 ----------
 
+_hist_source = "eastmoney"
+
+
 def backfill_daily_history(session: Session, symbols: list[str], days: int) -> int:
-    """补齐日线历史（前复权），只插入缺失日期"""
+    """补齐日线历史（前复权），只插入缺失日期。源记忆避免逐只重复重试坏源"""
     start = date.today() - timedelta(days=days * 2)
     count = 0
     for symbol in symbols:
+        fetchers = {
+            "eastmoney": lambda: _hist_eastmoney(symbol, start),
+            "sina": lambda: _hist_sina(symbol, start),
+        }
         try:
-            rows = _retry(lambda: _hist_eastmoney(symbol, start))
-        except Exception:
-            logger.warning("eastmoney hist failed for %s, fallback to sina", symbol)
-            try:
-                rows = _retry(lambda: _hist_sina(symbol, start))
-            except Exception:
-                logger.exception("backfill failed for %s", symbol)
-                continue
+            rows, _ = _with_failover("_hist_source", fetchers, "hist")
+        except RuntimeError:
+            logger.error("backfill failed for %s (both sources)", symbol)
+            continue
         existing = set(
             session.scalars(select(DailyBar.date).where(DailyBar.symbol == symbol)).all()
         )

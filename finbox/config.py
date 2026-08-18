@@ -35,8 +35,10 @@ def _setup_no_proxy() -> None:
         return
     hosts = [
         "eastmoney.com",   # AkShare 东财行情/K线
-        "sina.com.cn",     # 新浪行情
+        "sina.com.cn",     # 新浪（日线/财务）
         "sina.com",
+        "sinajs.cn",       # 新浪实时行情 hq.sinajs.cn
+        "gtimg.cn",        # 腾讯行情 qt.gtimg.cn
         "10jqka.com.cn",   # 同花顺
         "cninfo.com.cn",   # 巨潮
         "sse.com.cn", "szse.cn",  # 交易所

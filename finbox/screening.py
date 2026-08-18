@@ -4,32 +4,37 @@ import json
 import logging
 from datetime import date, datetime
 
-import requests
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from . import config
-from .collector import _prefixed, _retry, backfill_daily_history
+from .collector import _http, _prefixed, _retry, backfill_daily_history
 from .models import DailyBar, Screening
 
 logger = logging.getLogger(__name__)
 
-_HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"}
-
 _code_list_cache: tuple[date, list[str]] | None = None
+
+
+_screening_source = "eastmoney"  # 进程内记忆：成功的源优先
 
 
 def run_screening(session: Session) -> list[Screening]:
     """全市场初筛，候选落库并返回。双源都失败返回空列表（本轮无候选，不影响决策）"""
-    try:
-        picks = _retry(_screen_eastmoney)
-    except Exception:
-        logger.warning("eastmoney screening failed, fallback to tencent")
+    global _screening_source
+    screeners = {"eastmoney": _screen_eastmoney, "tencent": _screen_tencent}
+    order = ["eastmoney", "tencent"] if _screening_source == "eastmoney" else ["tencent", "eastmoney"]
+    picks = None
+    for src in order:
         try:
-            picks = _screen_tencent()
+            picks = _retry(screeners[src]) if src == "eastmoney" else screeners[src]()
+            _screening_source = src
+            break
         except Exception:
-            logger.exception("screening fetch failed (both sources)")
-            return []
+            logger.warning("%s screening failed, trying next source", src)
+    if picks is None:
+        logger.error("screening fetch failed (both sources)")
+        return []
 
     now = datetime.now()
     results = []
@@ -119,26 +124,38 @@ def _screen_tencent() -> dict:
 
 
 def _a_share_codes() -> list[str]:
-    """全 A 代码表（交易所官方，当日缓存）"""
+    """全 A 代码表（交易所官方）。优先用当日新缓存，刷新失败用过期缓存兜底"""
     global _code_list_cache
     today = date.today()
     if _code_list_cache and _code_list_cache[0] == today:
         return _code_list_cache[1]
     import akshare as ak
 
-    df = ak.stock_info_a_code_name()
-    codes = [str(c) for c in df["code"]]
-    _code_list_cache = (today, codes)
-    return codes
+    try:
+        df = ak.stock_info_a_code_name()
+        codes = [str(c) for c in df["code"]]
+        _code_list_cache = (today, codes)
+        return codes
+    except Exception:
+        if _code_list_cache:
+            logger.warning("code list refresh failed, using stale cache")
+            return _code_list_cache[1]
+        raise
 
 
 def _tencent_market_quotes() -> list[dict]:
-    """全市场批量报价：腾讯接口每次 60 只，全 A 约 90 次请求"""
+    """全市场批量报价：腾讯接口每次 60 只，全 A 约 90 次请求；单批失败跳过不整轮作废"""
     codes = _a_share_codes()
     rows = []
+    failed = 0
     for i in range(0, len(codes), 60):
         batch = ",".join(_prefixed(c) for c in codes[i : i + 60])
-        r = requests.get(f"https://qt.gtimg.cn/q={batch}", headers=_HEADERS, timeout=10)
+        try:
+            r = _retry(lambda: _http.get(f"https://qt.gtimg.cn/q={batch}", timeout=10))
+        except Exception:
+            failed += 1
+            logger.warning("tencent batch %d failed, skipped", i // 60)
+            continue
         r.encoding = "gbk"
         for line in r.text.split(";"):
             _, _, payload = line.strip().partition('="')
@@ -152,6 +169,10 @@ def _tencent_market_quotes() -> list[dict]:
                 "code": f[2], "name": f[1], "price": price,
                 "pct": _f(f[32]), "turnover": _f(f[38]), "volume_ratio": _f(f[49]),
             })
+    if failed:
+        logger.warning("tencent quotes: %d batches failed", failed)
+    if not rows:
+        raise RuntimeError("tencent quotes: all batches failed")
     return rows
 
 

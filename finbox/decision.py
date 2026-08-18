@@ -137,15 +137,16 @@ def run_decision(session: Session) -> AIDecision:
     context, prices, names = _build_context(session, candidates)
 
     decision = AIDecision(model=config.LLM_MODEL, context=context, status="error")
-    session.add(decision)
-    session.flush()
 
     if not config.LLM_API_KEY:
         decision.note = "未配置 LLM_API_KEY，跳过"
         decision.status = "rejected"
+        session.add(decision)
+        session.flush()
         return decision
 
-    client = OpenAI(base_url=config.LLM_BASE_URL, api_key=config.LLM_API_KEY)
+    # 注意：LLM 网络调用期间不能持有数据库写事务（SQLite 单写者）
+    client = OpenAI(base_url=config.LLM_BASE_URL, api_key=config.LLM_API_KEY, timeout=600)
     try:
         resp = client.chat.completions.create(
             model=config.LLM_MODEL,
@@ -161,7 +162,13 @@ def run_decision(session: Session) -> AIDecision:
     except Exception as e:
         logger.exception("LLM 调用或解析失败")
         decision.note = f"{type(e).__name__}: {e}"
+        session.add(decision)
+        session.flush()
         return decision
+
+    # LLM 已返回，现在才进入写事务
+    session.add(decision)
+    session.flush()
 
     actions = parsed.get("actions") or []
     decision.actions = json.dumps(actions, ensure_ascii=False)
