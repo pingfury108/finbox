@@ -19,10 +19,13 @@ SYSTEM_PROMPT = """你是一个 A 股职业交易员，正在管理一个真实�
 规则：
 1. 可交易范围 = 当前持仓 + 今日候选（全市场初筛结果） + 自选池（如有）
 2. 买卖数量必须是 100 的整数倍
-3. 买入金额不能超过可用现金
-4. 候选股重点看：入选原因、量比/换手是否放大、趋势位置；优中选优，不要撒胡椒面
-5. 这是真实资金，亏损是真实的：控制风险，不要满仓单只股票，没有把握就 hold，不操作也是合法决策
-6. 严格输出 JSON，不要输出其他内容：
+3. 买入金额不能超过可用现金（含佣金等费用）
+4. T+1 规则：当天买入的股票当天不能卖出
+5. 涨停的股票买不进、跌停的卖不出（主板±10%，创业板/科创板±20%），接近涨跌停的谨慎操作
+6. 每次交易有费用（佣金+印花税），频繁倒手会侵蚀收益
+7. 候选股重点看：入选原因、量比/换手是否放大、趋势位置；优中选优，不要撒胡椒面
+8. 这是真实资金，亏损是真实的：控制风险，不要满仓单只股票，没有把握就 hold，不操作也是合法决策
+9. 严格输出 JSON，不要输出其他内容：
 {"actions": [{"action": "buy"|"sell"|"hold", "symbol": "代码", "quantity": 数量, "reason": "理由"}], "comment": "整体判断"}
 """
 
@@ -128,6 +131,19 @@ def _parse_actions(raw: str) -> dict:
     return json.loads(text)
 
 
+def _fresh_price(session: Session, symbol: str) -> float | None:
+    """下单用最新价：5 分钟内的采集快照，否则实时拉一次（新浪）"""
+    from .collector import live_quote
+
+    q = session.scalar(
+        select(Quote).where(Quote.symbol == symbol).order_by(Quote.ts.desc()).limit(1)
+    )
+    if q and (datetime.now() - q.ts).total_seconds() < 300:
+        return q.price
+    live = live_quote(symbol)
+    return live["price"] if live else None
+
+
 def run_decision(session: Session) -> AIDecision:
     """一轮决策：初筛（交易时段）→ 问 LLM → 解析 → 下单 → 留痕"""
     if is_trading_time():
@@ -185,13 +201,21 @@ def run_decision(session: Session) -> AIDecision:
             continue
         try:
             qty = int(act.get("quantity", 0))
+            # 下单前重新取最新价：LLM 响应可能耗时数分钟，上下文价格已失效
+            price = _fresh_price(session, symbol) or prices[symbol]
+            if not price:
+                notes.append(f"{symbol} 无最新行情，跳过")
+                continue
+            ref = prices[symbol]
+            if abs(price / ref - 1) > 0.01:
+                notes.append(f"{symbol} 价格已变动 {ref:.2f} → {price:.2f}，按新价成交")
             if action == "buy":
                 engine.buy(
                     session, symbol, names.get(symbol, symbol),
-                    prices[symbol], qty, decision_id=decision.id,
+                    price, qty, decision_id=decision.id,
                 )
             elif action == "sell":
-                engine.sell(session, symbol, prices[symbol], qty, decision_id=decision.id)
+                engine.sell(session, symbol, price, qty, decision_id=decision.id)
             else:
                 continue
             executed += 1

@@ -83,6 +83,9 @@ def start_scheduler() -> BackgroundScheduler:
     # 启动时立即补一次历史，之后每个交易日 9:15 盘前刷新
     sched.add_job(backfill_job, next_run_time=datetime.now(), id="backfill_now")
     sched.add_job(backfill_job, "cron", hour=9, minute=15, id="backfill_daily")
+    # 交易时段内启动的，立即决策一次（interval 任务首轮要等 30 分钟）
+    if is_trading_time():
+        sched.add_job(decision_job, next_run_time=datetime.now(), id="decide_now")
     sched.start()
     logger.info("scheduler started: collect=%ds, decide=%dm",
                 config.COLLECT_INTERVAL_SECONDS, config.AI_DECISION_INTERVAL_MINUTES)

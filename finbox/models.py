@@ -55,6 +55,7 @@ class Trade(Base):
     price: Mapped[float]
     quantity: Mapped[int]
     amount: Mapped[float]
+    fee: Mapped[float] = mapped_column(default=0.0)
     ts: Mapped[datetime] = mapped_column(default=datetime.now)
     decision_id: Mapped[int | None] = mapped_column(ForeignKey("ai_decisions.id"))
 
