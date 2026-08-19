@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from . import config
 from .collector import _http, _prefixed, _retry, backfill_daily_history
-from .models import DailyBar, Screening
+from .models import AIDecision, DailyBar, Screening
 
 logger = logging.getLogger(__name__)
 
@@ -20,14 +20,24 @@ _screening_source = "eastmoney"  # 进程内记忆：成功的源优先
 
 
 def run_screening(session: Session) -> list[Screening]:
-    """全市场初筛，候选落库并返回。双源都失败返回空列表（本轮无候选，不影响决策）"""
+    """全市场初筛，候选落库并返回。双源都失败返回空列表（本轮无候选，不影响决策）
+
+    采纳上一轮 AI 的 screen_focus 建议：侧重维度取 2N，其余取 N/2
+    """
     global _screening_source
+    focus = session.scalar(
+        select(AIDecision.screen_focus)
+        .where(AIDecision.screen_focus.isnot(None))
+        .order_by(AIDecision.ts.desc())
+        .limit(1)
+    )
+    sizes = _dim_sizes(focus)
     screeners = {"eastmoney": _screen_eastmoney, "tencent": _screen_tencent}
     order = ["eastmoney", "tencent"] if _screening_source == "eastmoney" else ["tencent", "eastmoney"]
     picks = None
     for src in order:
         try:
-            picks = _retry(screeners[src]) if src == "eastmoney" else screeners[src]()
+            picks = _retry(lambda: screeners[src](sizes)) if src == "eastmoney" else screeners[src](sizes)
             _screening_source = src
             break
         except Exception:
@@ -63,16 +73,34 @@ def run_screening(session: Session) -> list[Screening]:
 
 
 def today_candidates(session: Session) -> list[Screening]:
-    """今天最新一批候选"""
-    latest_ts = session.scalar(select(Screening.ts).order_by(Screening.ts.desc()).limit(1))
-    if not latest_ts or latest_ts.date() != datetime.now().date():
-        return []
-    return session.scalars(select(Screening).where(Screening.ts == latest_ts)).all()
+    """今日候选 = 最新一批全市场初筛 + 今日所有 AI 提名"""
+    rows = session.scalars(
+        select(Screening)
+        .where(func.date(Screening.ts) == date.today())
+        .order_by(Screening.ts)
+    ).all()
+    screened = [r for r in rows if not r.reason.startswith("AI提名")]
+    nominated = [r for r in rows if r.reason.startswith("AI提名")]
+    if screened:
+        latest_ts = screened[-1].ts
+        screened = [r for r in screened if r.ts == latest_ts]
+    return screened + nominated
 
 
 # ---------- 东财主源 ----------
 
-def _screen_eastmoney() -> dict:
+FOCUS_DIMS = ("涨幅", "量比", "趋势")
+
+
+def _dim_sizes(focus: str | None) -> dict[str, int]:
+    """各维度取数：AI 侧重维度 2N，其余 N/2（下限 5）"""
+    n = config.SCREEN_TOP_N
+    if focus not in FOCUS_DIMS:
+        return {d: n for d in FOCUS_DIMS}
+    return {d: (n * 2 if d == focus else max(n // 2, 5)) for d in FOCUS_DIMS}
+
+
+def _screen_eastmoney(sizes: dict[str, int]) -> dict:
     import akshare as ak  # 延迟导入
 
     df = ak.stock_zh_a_spot_em()
@@ -81,45 +109,49 @@ def _screen_eastmoney() -> dict:
 
     picks: dict[str, dict] = {}
 
-    def take(col: str, reason: str, min_val: float | None = None) -> None:
+    def take(col: str, reason: str, min_val: float | None = None, n: int = 0) -> None:
         sub = df if min_val is None else df[df[col] >= min_val]
-        for _, r in sub.sort_values(col, ascending=False).head(config.SCREEN_TOP_N).iterrows():
+        for _, r in sub.sort_values(col, ascending=False).head(n).iterrows():
             _pick(picks, str(r["代码"]), str(r["名称"]), reason, {
                 "price": float(r["最新价"]),
                 "pct": float(r["涨跌幅"]),
                 "volume_ratio": _f(r["量比"]),
                 "turnover": _f(r["换手率"]),
                 "chg60": _f(r["60日涨跌幅"]),
+                "pe": _f(r["市盈率-动态"]),
+                "pb": _f(r["市净率"]),
+                "mktcap": _f(r["总市值"]),
             })
 
-    take("涨跌幅", "涨幅Top")
-    take("量比", "量比Top", min_val=2.0)
-    take("60日涨跌幅", "60日涨幅Top")
+    take("涨跌幅", "涨幅Top", n=sizes["涨幅"])
+    take("量比", "量比Top", min_val=2.0, n=sizes["量比"])
+    take("60日涨跌幅", "60日涨幅Top", n=sizes["趋势"])
     return picks
 
 
 # ---------- 腾讯兜底 ----------
 
-def _screen_tencent() -> dict:
+def _screen_tencent(sizes: dict[str, int]) -> dict:
     rows = _tencent_market_quotes()
     rows = [r for r in rows if "ST" not in r["name"] and "退" not in r["name"]]
 
     picks: dict[str, dict] = {}
 
-    def take(key: str, reason: str, min_val: float | None = None) -> None:
+    def take(key: str, reason: str, min_val: float | None = None, n: int = 0) -> None:
         sub = [r for r in rows if r[key] is not None]
         if min_val is not None:
             sub = [r for r in sub if r[key] >= min_val]
-        for r in sorted(sub, key=lambda x: x[key], reverse=True)[: config.SCREEN_TOP_N]:
+        for r in sorted(sub, key=lambda x: x[key], reverse=True)[:n]:
             _pick(picks, r["code"], r["name"], reason, {
                 "price": r["price"], "pct": r["pct"],
                 "volume_ratio": r["volume_ratio"], "turnover": r["turnover"],
                 "chg60": None,  # 腾讯快照无此字段
+                "pe": r["pe"], "pb": r["pb"], "mktcap": r["mktcap"],
             })
 
-    take("pct", "涨幅Top")
-    take("volume_ratio", "量比Top", min_val=2.0)
-    take("turnover", "换手Top", min_val=5.0)
+    take("pct", "涨幅Top", n=sizes["涨幅"])
+    take("volume_ratio", "量比Top", min_val=2.0, n=sizes["量比"])
+    take("turnover", "换手Top", min_val=5.0, n=sizes["趋势"])
     return picks
 
 
@@ -168,6 +200,7 @@ def _tencent_market_quotes() -> list[dict]:
             rows.append({
                 "code": f[2], "name": f[1], "price": price,
                 "pct": _f(f[32]), "turnover": _f(f[38]), "volume_ratio": _f(f[49]),
+                "pe": _f(f[39]), "mktcap": _f(f[45]), "pb": _f(f[46]),
             })
     if failed:
         logger.warning("tencent quotes: %d batches failed", failed)

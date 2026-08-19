@@ -27,6 +27,8 @@ AI_DECISION_INTERVAL_MINUTES = int(os.getenv("AI_DECISION_INTERVAL_MINUTES", "30
 HISTORY_DAYS = int(os.getenv("HISTORY_DAYS", "250"))  # 启动时补齐的日线历史长度（交易日）
 
 LOT_SIZE = 100  # A 股一手
+MAX_POSITIONS = 5  # 持股数量上限（硬护栏）
+MAX_POSITION_PCT = 0.4  # 单票市值占总资产上限（硬护栏）
 
 
 def _setup_no_proxy() -> None:

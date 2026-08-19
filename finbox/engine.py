@@ -71,6 +71,13 @@ def _today_bought(session: Session, symbol: str) -> int:
     )
 
 
+def _total_asset(session: Session, account: Account) -> float:
+    positions = session.scalars(select(Position)).all()
+    prices = latest_prices(session, [p.symbol for p in positions])
+    mv = sum(prices.get(p.symbol, p.avg_cost) * p.quantity for p in positions)
+    return account.cash + mv
+
+
 def buy(
     session: Session,
     symbol: str,
@@ -96,8 +103,17 @@ def buy(
     if amount + fee > account.cash:
         raise ValueError(f"资金不足: 需要 {amount + fee:.2f}(含费{fee:.2f}), 可用 {account.cash:.2f}")
 
-    account.cash = round(account.cash - amount - fee, 2)
+    # 硬护栏：单票仓位 ≤ 40% 总资产，持股 ≤ 5 只
     position = session.scalar(select(Position).where(Position.symbol == symbol))
+    total = _total_asset(session, account)
+    if (position.quantity * price if position else 0) + amount > total * config.MAX_POSITION_PCT:
+        raise ValueError(f"单票仓位超限: 买入后市值占比将超 {config.MAX_POSITION_PCT:.0%}")
+    if position is None:
+        held = session.scalar(select(func.count(Position.id)))
+        if held >= config.MAX_POSITIONS:
+            raise ValueError(f"持股数量超限: 已持有 {held} 只，上限 {config.MAX_POSITIONS} 只")
+
+    account.cash = round(account.cash - amount - fee, 2)
     if position:
         total_qty = position.quantity + quantity
         position.avg_cost = round(

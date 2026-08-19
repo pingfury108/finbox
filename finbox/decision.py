@@ -2,15 +2,15 @@
 
 import json
 import logging
-from datetime import datetime
+from datetime import date, datetime
 
 from openai import OpenAI
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from . import config, engine, screening
 from .market import is_trading_time
-from .models import AIDecision, DailyBar, Position, Quote, Screening, Trade
+from .models import AIDecision, DailyBar, Position, Quote, Review, Screening, Trade
 
 logger = logging.getLogger(__name__)
 
@@ -25,9 +25,32 @@ SYSTEM_PROMPT = """你是一个 A 股职业交易员，正在管理一个真实�
 6. 每次交易有费用（佣金+印花税），频繁倒手会侵蚀收益
 7. 候选股重点看：入选原因、量比/换手是否放大、趋势位置；优中选优，不要撒胡椒面
 8. 这是真实资金，亏损是真实的：控制风险，不要满仓单只股票，没有把握就 hold，不操作也是合法决策
-9. 严格输出 JSON，不要输出其他内容：
-{"actions": [{"action": "buy"|"sell"|"hold", "symbol": "代码", "quantity": 数量, "reason": "理由"}], "comment": "整体判断"}
+9. 复盘你的历史决策：被验证错误的判断要总结教训并调整，验证有效的思路可以延续
+10. 如果你对池外某只股票有明确判断，可在 nominate 中提名（最多 2 只），系统会验证其真实数据，合格后下一轮起可交易
+11. 你可以用 screen_focus 建议下一轮初筛的侧重方向（\"涨幅\"/\"量比\"/\"趋势\" 三选一，可选）
+12. 严格输出 JSON，不要输出其他内容：
+{"actions": [{"action": "buy"|"sell"|"hold", "symbol": "代码", "quantity": 数量, "reason": "理由"}], "nominate": [{"symbol": "代码", "reason": "理由"}], "screen_focus": "量比", "comment": "整体判断"}
 """
+
+
+def _intraday_summary(session: Session, symbol: str) -> str:
+    """当日分时特征：振幅 + 当前所处日内区间位置"""
+    qs = session.scalars(
+        select(Quote)
+        .where(Quote.symbol == symbol, func.date(Quote.ts) == date.today())
+        .order_by(Quote.ts)
+    ).all()
+    if len(qs) < 5:
+        return ""
+    prices = [q.price for q in qs]
+    hi, lo, last = max(prices), min(prices), prices[-1]
+    prev = engine._prev_close(session, symbol)
+    if not prev or hi == lo:
+        return ""
+    amp = (hi - lo) / prev * 100
+    pos = (last - lo) / (hi - lo)
+    where = "日内高点附近" if pos > 0.8 else "日内低点附近" if pos < 0.2 else "区间中部"
+    return f"今日振幅{amp:.1f}%, 当前位于{where}"
 
 
 def _trend_summary(session: Session, symbol: str) -> str:
@@ -63,6 +86,42 @@ def _latest_names(session: Session, symbols: list[str]) -> dict[str, str]:
     return names
 
 
+def _market_overview() -> str:
+    """大盘指数快照（腾讯源）"""
+    try:
+        from .collector import _http
+
+        r = _http.get("https://qt.gtimg.cn/q=sh000001,sz399001,sz399006", timeout=8)
+        r.encoding = "gbk"
+        parts = []
+        for line in r.text.split(";"):
+            _, _, payload = line.strip().partition('="')
+            f = payload.rstrip('"').split("~")
+            if len(f) > 33 and f[3]:
+                parts.append(f"{f[1]} {f[3]} ({f[32]}%)")
+        return " | ".join(parts) or "获取失败"
+    except Exception:
+        return "获取失败"
+
+
+def _feedback_lines(session: Session, limit: int = 5) -> list[str]:
+    """近期已执行决策 + 复盘结果，供 AI 自我修正"""
+    ds = session.scalars(
+        select(AIDecision)
+        .where(AIDecision.status == "executed")
+        .order_by(AIDecision.ts.desc())
+        .limit(limit)
+    ).all()
+    lines = []
+    for d in reversed(ds):
+        trades = session.scalars(select(Trade).where(Trade.decision_id == d.id)).all()
+        reviews = session.scalars(select(Review).where(Review.decision_id == d.id)).all()
+        acts = ", ".join(f"{t.side} {t.symbol}{t.name}@{t.price:.2f}" for t in trades)
+        fb = "; ".join(f"{r.days_after}天后浮动{r.pnl:+.0f}元" for r in reviews) or "未到复盘期"
+        lines.append(f"{d.ts:%m-%d %H:%M} {acts} → {fb}")
+    return lines
+
+
 def _build_context(
     session: Session, candidates: list[Screening]
 ) -> tuple[str, dict[str, float], dict[str, str]]:
@@ -85,7 +144,12 @@ def _build_context(
     for p in positions:
         names.setdefault(p.symbol, p.name)
 
-    lines = [f"时间: {datetime.now():%Y-%m-%d %H:%M}", f"可用现金: {account.cash:.2f} 元", ""]
+    lines = [
+        f"时间: {datetime.now():%Y-%m-%d %H:%M}",
+        f"可用现金: {account.cash:.2f} 元",
+        f"大盘: {_market_overview()}",
+        "",
+    ]
     lines.append("== 当前持仓 ==")
     if positions:
         for p in positions:
@@ -103,9 +167,11 @@ def _build_context(
         lines.append("== 自选池行情与趋势 ==")
         for s in watch:
             price = prices.get(s)
+            intraday = _intraday_summary(session, s)
             lines.append(
                 f"{s} {names.get(s, '')}: 最新价 {price if price else '无数据'} | "
                 f"{_trend_summary(session, s)}"
+                + (f" | {intraday}" if intraday else "")
             )
 
     if candidates:
@@ -113,12 +179,22 @@ def _build_context(
         lines.append("== 今日全市场初筛候选 ==")
         for c in candidates:
             m = json.loads(c.metrics)
+            cap = m.get("mktcap")
+            cap_str = f", 市值 {cap / 1e8:.0f}亿" if cap else ""
+            intraday = _intraday_summary(session, c.symbol)
             lines.append(
                 f"{c.symbol} {c.name}: 现价 {m.get('price')}, 涨幅 {m.get('pct')}%, "
                 f"量比 {m.get('volume_ratio')}, 换手 {m.get('turnover')}%, "
-                f"60日涨幅 {m.get('chg60')}% | 入选: {c.reason} | "
-                f"{_trend_summary(session, c.symbol)}"
+                f"60日涨幅 {m.get('chg60')}%, PE {m.get('pe')}, PB {m.get('pb')}{cap_str} | "
+                f"入选: {c.reason} | {_trend_summary(session, c.symbol)}"
+                + (f" | {intraday}" if intraday else "")
             )
+
+    feedback = _feedback_lines(session)
+    if feedback:
+        lines.append("")
+        lines.append("== 近期决策与复盘（你的历史表现，用于自我修正）==")
+        lines.extend(feedback)
     return "\n".join(lines), prices, names
 
 
@@ -129,6 +205,34 @@ def _parse_actions(raw: str) -> dict:
         if text.startswith("json"):
             text = text[4:]
     return json.loads(text)
+
+
+def _handle_nomination(session: Session, symbol: str, reason: str) -> str:
+    """处理 AI 提名：验证真实性 → 回填历史 → 入候选池（下轮可交易）"""
+    from .collector import backfill_daily_history, live_quote
+
+    if not (symbol.isdigit() and len(symbol) == 6):
+        return f"提名 {symbol or '(空)'} 无效代码，忽略"
+    pool = {c.symbol for c in screening.today_candidates(session)}
+    if symbol in pool:
+        return f"提名 {symbol} 已在池内，无需提名"
+    live = live_quote(symbol)
+    if not live:
+        return f"提名 {symbol} 无行情（不存在或停牌），忽略"
+    backfill_daily_history(session, [symbol], config.HISTORY_DAYS)
+    session.add(
+        Screening(
+            ts=datetime.now(), symbol=symbol, name=live["name"],
+            reason=f"AI提名: {reason[:50]}",
+            metrics=json.dumps(
+                {"price": live["price"], "pct": live["pct"], "volume_ratio": None,
+                 "turnover": None, "chg60": None, "pe": None, "pb": None, "mktcap": None},
+                ensure_ascii=False,
+            ),
+        )
+    )
+    session.flush()  # 让后续提名/本轮逻辑能看到
+    return f"提名 {symbol} {live['name']} 验证通过，已入池下轮可交易"
 
 
 def _fresh_price(session: Session, symbol: str) -> float | None:
@@ -183,6 +287,8 @@ def run_decision(session: Session) -> AIDecision:
         return decision
 
     # LLM 已返回，现在才进入写事务
+    if parsed.get("screen_focus") in ("涨幅", "量比", "趋势"):
+        decision.screen_focus = parsed["screen_focus"]
     session.add(decision)
     session.flush()
 
@@ -223,6 +329,9 @@ def run_decision(session: Session) -> AIDecision:
             notes.append(f"{action} {symbol} 被拒: {e}")
 
     decision.status = "executed" if executed else ("rejected" if notes else "hold")
+    # AI 主动提名池外股票：验证真实数据，合格的下轮起可交易
+    for nom in (parsed.get("nominate") or [])[:2]:
+        notes.append(_handle_nomination(session, str(nom.get("symbol", "")), str(nom.get("reason", ""))))
     decision.note = f"comment: {parsed.get('comment', '')}; " + "; ".join(notes)
     logger.info("AI decision %s: %d executed", decision.status, executed)
     return decision

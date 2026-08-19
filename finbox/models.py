@@ -73,6 +73,7 @@ class AIDecision(Base):
     actions: Mapped[str] = mapped_column(Text, default="[]")  # 解析后的 JSON
     status: Mapped[str] = mapped_column(String(16))  # executed / hold / rejected / error
     note: Mapped[str] = mapped_column(Text, default="")
+    screen_focus: Mapped[str | None] = mapped_column(String(16))  # AI 建议的下轮初筛侧重
 
 
 class AccountSnapshot(Base):
