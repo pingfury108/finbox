@@ -8,3 +8,8 @@ license.workspace = true
 [dependencies]
 duckdb = { workspace = true }
 thiserror = { workspace = true }
+chrono = { workspace = true }
+finbox-core = { path = "../finbox-core" }
+
+[dev-dependencies]
+finbox-core = { path = "../finbox-core" }

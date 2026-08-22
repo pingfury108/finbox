@@ -1,0 +1,17 @@
+[package]
+name = "finbox-decision"
+description = "finbox AI 决策：全市场初筛 -> LLM 决策 -> 委托意图（与执行解耦）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+finbox-core = { path = "../finbox-core" }
+finbox-store = { path = "../finbox-store" }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }

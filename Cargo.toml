@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hithink-sdk", "crates/finbox-store", "crates/finbox-collector"]
+members = ["crates/hithink-sdk", "crates/finbox-store", "crates/finbox-collector", "crates/finbox-core", "crates/finbox-trader", "crates/finbox-decision"]
 
 [workspace.package]
 version = "0.1.0"
@@ -18,6 +18,8 @@ duckdb = { version = "1", features = ["bundled"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 dotenvy = "0.15"
+async-trait = "0.1"
+chrono = "0.4"
 
 [profile.release]
 lto = true

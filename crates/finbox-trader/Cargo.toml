@@ -1,0 +1,15 @@
+[package]
+name = "finbox-trader"
+description = "finbox 交易执行层：Broker 抽象 + 模拟盘（A股规则）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+finbox-core = { path = "../finbox-core" }
+finbox-store = { path = "../finbox-store" }
+async-trait = "0.1"
+chrono = "0.4"
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }

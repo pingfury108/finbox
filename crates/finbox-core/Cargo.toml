@@ -1,0 +1,9 @@
+[package]
+name = "finbox-core"
+description = "finbox 交易领域模型与 A 股规则"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }

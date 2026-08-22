@@ -13,6 +13,14 @@
 use std::path::Path;
 
 use duckdb::{params, Config, Connection};
+
+pub mod trading;
+pub mod market;
+pub mod decision;
+
+pub use decision::*;
+pub use market::*;
+
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -43,6 +51,19 @@ pub struct TradingDayRow {
     pub date_ms: i64,
 }
 
+/// 日 K 行（已推导出 `date` 为 `yyyy-MM-dd`）。
+#[derive(Debug, Clone)]
+pub struct DailyBarRow {
+    pub thscode: String,
+    pub date_ms: i64,
+    pub date: String,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
+    pub turnover: f64,
+}
 /// 盘中行情快照行。
 #[derive(Debug, Clone)]
 pub struct SnapshotRow {
@@ -124,6 +145,42 @@ CREATE TABLE IF NOT EXISTS snapshots (
     turnover               DOUBLE,
     PRIMARY KEY (ts_ms, thscode)
 );
+CREATE TABLE IF NOT EXISTS account (
+    id               INTEGER PRIMARY KEY,
+    cash             DOUBLE NOT NULL,
+    initial_capital  DOUBLE NOT NULL
+);
+CREATE TABLE IF NOT EXISTS positions (
+    thscode    VARCHAR PRIMARY KEY,
+    name       VARCHAR NOT NULL,
+    quantity   INTEGER NOT NULL,
+    avg_cost   DOUBLE NOT NULL
+);
+CREATE SEQUENCE IF NOT EXISTS trades_id_seq;
+CREATE TABLE IF NOT EXISTS trades (
+    id          INTEGER PRIMARY KEY DEFAULT nextval('trades_id_seq'),
+    thscode     VARCHAR NOT NULL,
+    name        VARCHAR NOT NULL,
+    side        VARCHAR(4) NOT NULL,
+    price       DOUBLE NOT NULL,
+    quantity    INTEGER NOT NULL,
+    amount      DOUBLE NOT NULL,
+    fee         DOUBLE NOT NULL DEFAULT 0,
+    decision_id INTEGER,
+    ts_ms       BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_trades_thscode_ts ON trades (thscode, ts_ms);
+CREATE INDEX IF NOT EXISTS ix_snapshots_thscode_ts ON snapshots (thscode, ts_ms);
+CREATE TABLE IF NOT EXISTS decision_logs (
+    id           INTEGER PRIMARY KEY DEFAULT nextval('trades_id_seq'),
+    ts_ms        BIGINT NOT NULL,
+    model        VARCHAR NOT NULL,
+    context      VARCHAR,
+    raw_response VARCHAR,
+    actions      VARCHAR,
+    status       VARCHAR NOT NULL,
+    note         VARCHAR
+);
 "#;
 
 /// DuckDB 本地行情库。
@@ -186,6 +243,26 @@ impl Db {
         })
     }
 
+    /// 批量插入日 K（测试/手工用）。
+    pub fn insert_daily_bars(&self, rows: &[DailyBarRow]) -> Result<u64> {
+        with_tx(&self.conn, |conn| {
+            let mut stmt = conn.prepare(
+                "INSERT INTO daily_bars VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT (thscode, date_ms) DO UPDATE SET
+                    date = excluded.date, open_price = excluded.open_price,
+                    high_price = excluded.high_price, low_price = excluded.low_price,
+                    close_price = excluded.close_price, volume = excluded.volume,
+                    turnover = excluded.turnover",
+            )?;
+            for r in rows {
+                stmt.execute(params![
+                    r.thscode, r.date_ms, r.date, r.open, r.high, r.low, r.close, r.volume, r.turnover
+                ])?;
+            }
+            Ok(rows.len() as u64)
+        })
+    }
+
     /// 插入一批同时间戳的行情快照（按 PK 去重），返回写入行数。
     pub fn insert_snapshots(&self, ts_ms: i64, rows: &[SnapshotRow]) -> Result<u64> {
         with_tx(&self.conn, |conn| {
@@ -215,8 +292,7 @@ impl Db {
     /// 导入全市场日 K Parquet（未复权），按 (thscode, date_ms) UPSERT，返回写入行数。
     ///
     /// `date` 列由 `date_ms`（Asia/Shanghai 零点毫秒）加 8h 偏移推导为 `yyyy-MM-dd`。
-    pub fn import_daily_k_parquet(&self, parquet: &Path) -> Result<u64> {
-        let p = sql_str(parquet);
+    pub fn import_daily_k_parquet(&self, parquet: &Path) -> Result<u64> {        let p = sql_str(parquet);
         let sql = format!(
             "INSERT INTO daily_bars
              SELECT thscode, date_ms,
