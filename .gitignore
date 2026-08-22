@@ -6,3 +6,5 @@ __pycache__/
 *.db-shm
 *.db-wal
 .ruff_cache/
+target/
+data/

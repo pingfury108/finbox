@@ -1,0 +1,18 @@
+[package]
+name = "finbox-collector"
+description = "finbox 数据采集同步：同花顺数据 -> DuckDB"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hithink-sdk = { path = "../hithink-sdk" }
+finbox-store = { path = "../finbox-store" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+dotenvy = { workspace = true }
+
+[[bin]]
+name = "finbox-collector"
+path = "src/main.rs"

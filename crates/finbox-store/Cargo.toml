@@ -1,0 +1,10 @@
+[package]
+name = "finbox-store"
+description = "finbox DuckDB 本地行情库"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+duckdb = { workspace = true }
+thiserror = { workspace = true }
