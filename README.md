@@ -18,7 +18,7 @@ crates/
 ├── finbox-collector   数据采集同步 CLI（init/sync/index/snapshot/...）
 ├── finbox-trader      Broker trait + SimBroker + 风控层
 ├── finbox-decision    全市场初筛（SQL打分）+ LLM 决策（意图解耦）
-└── finbox-app         主程序：单进程调度（采集 + 多账户）+ Web
+└── finbox-app         主程序（产物名 finbox）：单进程调度（采集 + 多账户 + Web）
 ```
 
 数据目录：`data/market.duckdb`（共享行情）+ `data/accounts/<名>/account.duckdb`（每账户独立，互不干扰）。
@@ -34,9 +34,8 @@ cargo run -p finbox-collector -- index --days 1200
 # 2. 创建模拟账户
 cargo run -p finbox-app -- account create 我的账户 --capital 200000
 
-# 3. 启动（常驻调度 + Web）
-cargo run -p finbox-app -- run --serve --bind 0.0.0.0:8000
-# 或仅 Web：cargo run -p finbox-app -- serve
+# 3. 一键启动整个系统（采集 + 多账户调度 + Web，端口 FINBOX_BIND 默认 0.0.0.0:8000）
+cargo run --release -p finbox-app -- run
 ```
 
 打开 http://localhost:8000
