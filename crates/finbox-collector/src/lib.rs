@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use anyhow::Result;
-use finbox_store::{Db, SnapshotRow, TickerRow, TradingDayRow};
+use finbox_store::{SharedDb, SnapshotRow, TickerRow, TradingDayRow};
 use hithink_sdk::{Client, DumpKind, TradingDaysData};
 
 /// 增量 dump 覆盖窗口（交易日）。落后超过此交易日数时必须全量重拉。
@@ -19,16 +19,16 @@ const TICKER_PAGE_LIMIT: u32 = 10000;
 
 pub struct Collector {
     pub client: Client,
-    pub db: Db,
+    pub db: SharedDb,
 }
 
 impl Collector {
-    pub fn new(client: Client, db: Db) -> Self {
+    pub fn new(client: Client, db: SharedDb) -> Self {
         Self { client, db }
     }
 
     /// 同步 A 股代码表（沪深京），返回标的数量。
-    pub async fn sync_tickers(&mut self) -> Result<usize> {
+    pub async fn sync_tickers(&self) -> Result<usize> {
         let mut all: Vec<TickerRow> = Vec::new();
         let mut offset = 0u32;
         loop {
@@ -51,50 +51,50 @@ impl Collector {
             offset += TICKER_PAGE_LIMIT;
         }
         let n = all.len();
-        self.db.upsert_tickers(&all)?;
+        self.db.lock().unwrap().upsert_tickers(&all)?;
         Ok(n)
     }
 
     /// 拉取并落库交易日历，返回交易日数量。
-    pub async fn sync_trading_days(&mut self) -> Result<usize> {
+    pub async fn sync_trading_days(&self) -> Result<usize> {
         let data = self.client.trading_days().await?;
         self.upsert_trading_days(&data).await
     }
 
     /// 落库已拉取的交易日历，返回写入行数。
-    pub async fn upsert_trading_days(&mut self, data: &TradingDaysData) -> Result<usize> {
+    pub async fn upsert_trading_days(&self, data: &TradingDaysData) -> Result<usize> {
         let rows: Vec<TradingDayRow> = data
             .item
             .iter()
             .map(|d| TradingDayRow { date: d.date.clone(), date_ms: d.date_ms })
             .collect();
         let n = rows.len();
-        self.db.upsert_trading_days(&rows)?;
+        self.db.lock().unwrap().upsert_trading_days(&rows)?;
         Ok(n)
     }
 
     /// 全市场 10 年日 K 全量导入（未复权），返回写入行数。
-    pub async fn import_daily_k_full(&mut self, dump_dir: &Path) -> Result<u64> {
+    pub async fn import_daily_k_full(&self, dump_dir: &Path) -> Result<u64> {
         let dest = dump_dir.join(DumpKind::DailyK.default_filename());
         self.client.download_dump(DumpKind::DailyK, &dest).await?;
-        let n = self.db.import_daily_k_parquet(&dest)?;
-        self.db.meta_set("last_daily_k_full_sync", &now_ms().to_string())?;
+        let n = self.db.lock().unwrap().import_daily_k_parquet(&dest)?;
+        self.db.lock().unwrap().meta_set("last_daily_k_full_sync", &now_ms().to_string())?;
         Ok(n)
     }
 
     /// 全市场复权事件导入，返回写入行数。
-    pub async fn import_adjustment_factors(&mut self, dump_dir: &Path) -> Result<u64> {
+    pub async fn import_adjustment_factors(&self, dump_dir: &Path) -> Result<u64> {
         let dest = dump_dir.join(DumpKind::AdjustmentFactors.default_filename());
         self.client.download_dump(DumpKind::AdjustmentFactors, &dest).await?;
-        let n = self.db.import_adjustment_factors_parquet(&dest)?;
-        self.db.meta_set("last_adjustment_sync", &now_ms().to_string())?;
+        let n = self.db.lock().unwrap().import_adjustment_factors_parquet(&dest)?;
+        self.db.lock().unwrap().meta_set("last_adjustment_sync", &now_ms().to_string())?;
         Ok(n)
     }
 
     /// 日 K 同步：本地为空或落后超过增量窗口时全量，否则 10 交易日增量。
     /// `calendar` 为刚拉取的交易日历（用于精确计算落后交易日数）。
-    pub async fn sync_daily_bars(&mut self, dump_dir: &Path, calendar: &TradingDaysData) -> Result<u64> {
-        let last = self.db.last_bar_date()?;
+    pub async fn sync_daily_bars(&self, dump_dir: &Path, calendar: &TradingDaysData) -> Result<u64> {
+        let last = self.db.lock().unwrap().last_bar_date()?;
         match last {
             None => self.import_daily_k_full(dump_dir).await,
             Some(last) => {
@@ -103,8 +103,8 @@ impl Collector {
                 } else {
                     let dest = dump_dir.join(DumpKind::DailyK10d.default_filename());
                     self.client.download_dump(DumpKind::DailyK10d, &dest).await?;
-                    let n = self.db.import_daily_k_parquet(&dest)?;
-                    self.db.meta_set("last_daily_k_sync", &now_ms().to_string())?;
+                    let n = self.db.lock().unwrap().import_daily_k_parquet(&dest)?;
+                    self.db.lock().unwrap().meta_set("last_daily_k_sync", &now_ms().to_string())?;
                     Ok(n)
                 }
             }
@@ -112,7 +112,7 @@ impl Collector {
     }
 
     /// 采集一次全市场行情快照（分页），返回标的数量。
-    pub async fn collect_market_snapshot(&mut self) -> Result<usize> {
+    pub async fn collect_market_snapshot(&self) -> Result<usize> {
         let mut ts_ms: Option<i64> = None;
         let mut total = 0usize;
         let mut offset = 0u32;
@@ -142,7 +142,7 @@ impl Collector {
                 })
                 .collect();
             let n = rows.len();
-            self.db.insert_snapshots(ts_ms.unwrap(), &rows)?;
+            self.db.lock().unwrap().insert_snapshots(ts_ms.unwrap(), &rows)?;
             total += n;
             if n < SNAPSHOT_PAGE_LIMIT as usize {
                 break;
@@ -150,7 +150,7 @@ impl Collector {
             offset += SNAPSHOT_PAGE_LIMIT;
         }
         if let Some(ts) = ts_ms {
-            self.db.meta_set("last_snapshot_ts", &ts.to_string())?;
+            self.db.lock().unwrap().meta_set("last_snapshot_ts", &ts.to_string())?;
         }
         Ok(total)
     }

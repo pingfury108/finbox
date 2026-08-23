@@ -35,6 +35,26 @@ pub fn limit_ratio(thscode: &str) -> f64 {
     }
 }
 
+/// 规范化 A 股 thscode：LLM 可能返回纯 6 位代码，补全交易所后缀。
+/// 规则：60/68→SH，00/30/01→SZ，4/8→BJ；已带后缀或非 6 位数字则原样返回。
+pub fn normalize_thscode(symbol: &str) -> String {
+    let s = symbol.trim().to_uppercase();
+    if s.contains('.') {
+        return s;
+    }
+    if !(s.len() == 6 && s.chars().all(|c| c.is_ascii_digit())) {
+        return s;
+    }
+    let suffix = if s.starts_with("60") || s.starts_with("68") || s.starts_with("9") {
+        "SH"
+    } else if s.starts_with('4') || s.starts_with('8') {
+        "BJ"
+    } else {
+        "SZ"
+    };
+    format!("{s}.{suffix}")
+}
+
 /// 计算涨停价（含涨跌幅限制的买入上限价）。
 pub fn limit_up_price(prev_close: f64, thscode: &str) -> f64 {
     round_price(prev_close * (1.0 + limit_ratio(thscode)))
@@ -99,5 +119,16 @@ mod tests {
         // 周末
         assert!(!is_trading_time(6, 10 * 60));
         assert!(!is_trading_time(7, 10 * 60));
+    }
+
+    #[test]
+    fn normalize_thscode_cases() {
+        assert_eq!(normalize_thscode("600519"), "600519.SH");
+        assert_eq!(normalize_thscode("688981"), "688981.SH");
+        assert_eq!(normalize_thscode("000001"), "000001.SZ");
+        assert_eq!(normalize_thscode("300750"), "300750.SZ");
+        assert_eq!(normalize_thscode("830799"), "830799.BJ");
+        assert_eq!(normalize_thscode("600519.SH"), "600519.SH"); // 已带后缀
+        assert_eq!(normalize_thscode("abc"), "ABC"); // 非代码原样
     }
 }

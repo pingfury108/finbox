@@ -113,7 +113,7 @@ pub fn parse(raw: &str) -> Result<ParsedOutput, DecisionError> {
     Ok(ParsedOutput { actions: v.actions, actions_json, comment: v.comment })
 }
 
-/// 动作 → 委托意图（过滤 hold）。
+/// 动作 → 委托意图（过滤 hold）。thscode 统一规范化（LLM 可能给纯代码）。
 pub fn to_intents(actions: &[Action]) -> Vec<OrderIntent> {
     let mut out = Vec::new();
     for a in actions {
@@ -127,7 +127,7 @@ pub fn to_intents(actions: &[Action]) -> Vec<OrderIntent> {
             continue;
         }
         out.push(OrderIntent {
-            thscode: a.symbol.clone(),
+            thscode: finbox_core::rules::normalize_thscode(&a.symbol),
             name: String::new(),
             side,
             quantity: qty,

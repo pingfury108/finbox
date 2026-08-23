@@ -11,6 +11,7 @@
 //! 注意：DuckDB 单写多读，写操作应经由唯一写入方（collector/app）串行执行。
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use duckdb::{params, Config, Connection};
 
@@ -24,6 +25,17 @@ pub use market::*;
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+/// 进程内共享的 DuckDB 句柄。
+///
+/// DuckDB 单写多读且同进程多连接为独立实例互不可见，故整个应用共享**单一**连接，
+/// 写操作经 `Mutex` 串行化。
+pub type SharedDb = Arc<Mutex<Db>>;
+
+/// 打开共享句柄。
+pub fn open_shared(path: impl AsRef<Path>) -> Result<SharedDb> {
+    Ok(Arc::new(Mutex::new(Db::open(path)?)))
+}
 
 #[derive(Debug, Error)]
 pub enum StoreError {

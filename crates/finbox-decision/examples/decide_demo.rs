@@ -4,12 +4,12 @@
 //! 需要环境变量 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL。
 
 use finbox_decision::{DecisionEngine, LlmConfig};
-use finbox_store::Db;
+use finbox_store::open_shared;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let db_path = std::env::args().nth(1).unwrap_or_else(|| "data/finbox.duckdb".into());
-    let db = Db::open(&db_path)?;
+    let db = open_shared(&db_path)?;
 
     let config = LlmConfig {
         base_url: std::env::var("LLM_BASE_URL").unwrap_or_else(|_| "https://api.deepseek.com".into()),

@@ -9,27 +9,25 @@
 //!
 //! 成交价 = 最新行情快照价（盘中），无快照回退昨收价。钱是假的，价格是真的。
 
-use std::sync::Mutex;
-
 use chrono::{Datelike, Local, Timelike};
 use finbox_core::rules::{
     is_trading_time, limit_down_price, limit_up_price, round_price, COMMISSION_MIN,
     COMMISSION_RATE, LOT_SIZE, MAX_POSITIONS, MAX_POSITION_PCT, STAMP_RATE, TRANSFER_RATE,
 };
 use finbox_core::{Account, Execution, OrderIntent, OrderSide, Position, RejectReason, Trade};
-use finbox_store::Db;
+use finbox_store::{Db, SharedDb};
 
 use crate::{Broker, BrokerError};
 
-/// 模拟盘券商。内部用 Mutex 串行化 DuckDB 写操作（单写多读约束）。
+/// 模拟盘券商。内部用共享句柄的 `Mutex` 串行化 DuckDB 写操作（单写多读约束）。
 pub struct SimBroker {
-    db: Mutex<Db>,
+    db: SharedDb,
     initial_capital: f64,
 }
 
 impl SimBroker {
-    pub fn new(db: Db, initial_capital: f64) -> Self {
-        Self { db: Mutex::new(db), initial_capital }
+    pub fn new(db: SharedDb, initial_capital: f64) -> Self {
+        Self { db, initial_capital }
     }
 }
 
@@ -151,6 +149,11 @@ fn buy(db: &mut Db, initial_capital: f64, intent: &OrderIntent) -> Result<Execut
     // 记账
     let cash_after = round_price(account.cash - amount - fee);
     db.set_account_cash(cash_after).map_err(|e| RejectReason::Other(e.to_string()))?;
+    let name = if intent.name.is_empty() {
+        db.ticker_name(&intent.thscode).map_err(|e| RejectReason::Other(e.to_string()))?
+    } else {
+        intent.name.clone()
+    };
     if let Some(p) = position {
         let new_qty = p.quantity + intent.quantity;
         let avg_cost = round_price((p.avg_cost * p.quantity as f64 + amount) / new_qty as f64);
@@ -164,7 +167,7 @@ fn buy(db: &mut Db, initial_capital: f64, intent: &OrderIntent) -> Result<Execut
     } else {
         db.upsert_position(&Position {
             thscode: intent.thscode.clone(),
-            name: intent.name.clone(),
+            name: name.clone(),
             quantity: intent.quantity,
             avg_cost: price,
         })
@@ -173,7 +176,7 @@ fn buy(db: &mut Db, initial_capital: f64, intent: &OrderIntent) -> Result<Execut
 
     db.insert_trade(&Trade {
         thscode: intent.thscode.clone(),
-        name: intent.name.clone(),
+        name: name.clone(),
         side: OrderSide::Buy,
         price,
         quantity: intent.quantity,

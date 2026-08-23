@@ -3,7 +3,20 @@
 //! 模拟盘状态全部落库，重启不丢；成交价来自真实行情（快照/日K）。
 
 use crate::{Db, Result};
-use finbox_core::{Account, Position, Trade};
+use finbox_core::{Account, OrderSide, Position, Trade};
+
+/// 成交流水（查询用）。
+#[derive(Debug, Clone)]
+pub struct RecentTrade {
+    pub thscode: String,
+    pub name: String,
+    pub side: OrderSide,
+    pub price: f64,
+    pub quantity: u32,
+    pub amount: f64,
+    pub fee: f64,
+    pub ts_ms: i64,
+}
 
 impl Db {
     /// 读取模拟账户（不存在则按初始资金初始化）。
@@ -120,6 +133,16 @@ impl Db {
         Ok(account.cash + mv)
     }
 
+    /// 是否交易日（本地 trading_days 表，`date` 为 `yyyyMMdd`）。
+    pub fn is_trading_day(&self, yyyymmdd: &str) -> Result<bool> {
+        let v: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM trading_days WHERE date = ?",
+            duckdb::params![yyyymmdd],
+            |r| r.get(0),
+        )?;
+        Ok(v > 0)
+    }
+
     /// 代码表查询名称。
     pub fn ticker_name(&self, thscode: &str) -> Result<String> {
         let v: String = self.conn.query_row(
@@ -150,6 +173,30 @@ impl Db {
             |r| r.get::<_, Option<f64>>(0),
         )?;
         Ok(v)
+    }
+
+    /// 最近 N 条成交流水（时间倒序）。
+    pub fn recent_trades(&self, limit: u32) -> Result<Vec<RecentTrade>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT thscode, name, side, price, quantity, amount, fee, ts_ms
+             FROM trades ORDER BY ts_ms DESC LIMIT ?",
+        )?;
+        let mut rows = stmt.query(duckdb::params![limit as i64])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            let side: String = r.get(2)?;
+            out.push(RecentTrade {
+                thscode: r.get(0)?,
+                name: r.get(1)?,
+                side: if side == "BUY" { finbox_core::OrderSide::Buy } else { finbox_core::OrderSide::Sell },
+                price: r.get(3)?,
+                quantity: r.get::<_, i64>(4)? as u32,
+                amount: r.get(5)?,
+                fee: r.get(6)?,
+                ts_ms: r.get(7)?,
+            });
+        }
+        Ok(out)
     }
 
     fn last_insert_rowid(&self) -> i64 {

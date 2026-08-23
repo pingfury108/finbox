@@ -10,7 +10,7 @@ mod llm;
 mod screen;
 
 use finbox_core::OrderIntent;
-use finbox_store::{Db, DecisionLog};
+use finbox_store::{DecisionLog, SharedDb};
 use thiserror::Error;
 
 pub use screen::Candidate;
@@ -52,22 +52,26 @@ pub enum DecisionError {
 
 /// 决策引擎。
 pub struct DecisionEngine {
-    db: Db,
+    db: SharedDb,
     config: LlmConfig,
     /// 自选池（可为空）
     watchlist: Vec<String>,
 }
 
 impl DecisionEngine {
-    pub fn new(db: Db, config: LlmConfig, watchlist: Vec<String>) -> Self {
+    pub fn new(db: SharedDb, config: LlmConfig, watchlist: Vec<String>) -> Self {
         Self { db, config, watchlist }
     }
 
     /// 执行一轮决策：初筛 → 上下文 → LLM → 意图。
     /// `is_trading_time` 由调用方（调度器）告知，非交易时段用昨日候选并禁止下单由 Broker 兜底。
     pub async fn decide(&self, screen_top_n: u32) -> Result<DecisionResult, DecisionError> {
-        let candidates = screen::screen(&self.db, screen_top_n)?;
-        let ctx = context::build_context(&self.db, &self.watchlist, &candidates)?;
+        let (_, ctx) = {
+            let db = self.db.lock().unwrap();
+            let candidates = screen::screen(&db, screen_top_n)?;
+            let ctx = context::build_context(&db, &self.watchlist, &candidates)?;
+            (candidates, ctx)
+        };
 
         if self.config.api_key.is_empty() {
             let log = self.log_decision("", "", "[]", "rejected", "未配置 LLM_API_KEY，跳过");
@@ -124,6 +128,8 @@ impl DecisionEngine {
     fn log_decision(&self, ctx: &str, raw: &str, actions: &str, status: &str, note: &str) -> i64 {
         let ts = chrono::Utc::now().timestamp_millis();
         self.db
+            .lock()
+            .unwrap()
             .insert_decision_log(&DecisionLog {
                 id: 0,
                 ts_ms: ts,

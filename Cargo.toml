@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hithink-sdk", "crates/finbox-store", "crates/finbox-collector", "crates/finbox-core", "crates/finbox-trader", "crates/finbox-decision"]
+members = ["crates/hithink-sdk", "crates/finbox-store", "crates/finbox-collector", "crates/finbox-core", "crates/finbox-trader", "crates/finbox-decision", "crates/finbox-app"]
 
 [workspace.package]
 version = "0.1.0"

@@ -3,13 +3,13 @@
 //! 读取真实行情库（日K+快照），演示下单（交易时段外会被拒）。
 
 use finbox_core::{OrderIntent, OrderSide};
-use finbox_store::Db;
+use finbox_store::open_shared;
 use finbox_trader::{Broker, SimBroker};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let db_path = std::env::args().nth(1).unwrap_or_else(|| "data/finbox.duckdb".into());
-    let db = Db::open(&db_path)?;
+    let db = open_shared(&db_path)?;
     let broker = SimBroker::new(db, 200_000.0);
 
     let acct = broker.account().await?;

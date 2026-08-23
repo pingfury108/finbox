@@ -1,0 +1,21 @@
+[package]
+name = "finbox-app"
+description = "finbox 主程序：调度采集/决策/执行"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+finbox-core = { path = "../finbox-core" }
+finbox-store = { path = "../finbox-store" }
+finbox-collector = { path = "../finbox-collector" }
+finbox-trader = { path = "../finbox-trader" }
+finbox-decision = { path = "../finbox-decision" }
+hithink-sdk = { path = "../hithink-sdk" }
+tokio = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+dotenvy = { workspace = true }
+anyhow = { workspace = true }
+log = "0.4"
+env_logger = "0.11"

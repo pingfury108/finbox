@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use finbox_collector::Collector;
-use finbox_store::Db;
+use finbox_store::open_shared;
 use hithink_sdk::Client;
 
 #[derive(Parser)]
@@ -47,8 +47,8 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let client = Client::from_env()?;
-    let db = Db::open(&cli.db)?;
-    let mut c = Collector::new(client, db);
+    let db = open_shared(&cli.db)?;
+    let c = Collector::new(client, db);
 
     match cli.cmd {
         Cmd::Init { dump_dir } => {
@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
             println!("快照: {n} 只标的");
         }
         Cmd::Stats => {
-            let s = c.db.stats()?;
+            let s = c.db.lock().unwrap().stats()?;
             println!("代码表:     {}", s.tickers);
             println!("交易日历:   {}", s.trading_days);
             println!("日 K:       {}", s.daily_bars);
