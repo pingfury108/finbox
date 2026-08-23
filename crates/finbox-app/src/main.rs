@@ -1,11 +1,9 @@
 //! finbox-app：主程序。
 //!
 //! 子命令：
-//! - `run`                  单进程运行（采集 + 所有账户调度）
-//! - `serve`                启动 Web
+//! - `run`                  启动整个系统：采集 + 所有账户调度 + Web（唯一启动命令）
 //! - `account create/list/rm <name>`  账户管理
 //! - `decide --account <name>` 手动触发某账户一轮决策
-//! - `account <name> info`  账户概览
 
 mod accounts;
 mod api;
@@ -29,13 +27,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// 单进程运行：采集 + 所有账户调度
+    /// 启动整个系统：数据采集 + 所有账户调度 + Web 界面
     Run,
-    /// 启动 Web 界面
-    Serve {
-        #[arg(long, default_value = "0.0.0.0:8000")]
-        bind: String,
-    },
     /// 账户管理
     #[command(subcommand)]
     Account(AcctCmd),
@@ -75,13 +68,6 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Run => {
             let s = Scheduler::new(cfg)?;
             s.run().await?;
-        }
-        Cmd::Serve { bind } => {
-            let state = web::WebState::new(&cfg)?;
-            let app = web::router(state);
-            let listener = tokio::net::TcpListener::bind(&bind).await?;
-            log::info!("Web 界面已启动: http://{bind}");
-            axum::serve(listener, app).await?;
         }
         Cmd::Account(acct) => match acct {
             AcctCmd::Create { name, capital, watchlist } => {

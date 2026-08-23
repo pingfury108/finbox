@@ -58,9 +58,16 @@ impl Scheduler {
         Ok(Self { cfg, market, collector, last_collect: 0, pre_open_done: false })
     }
 
-    /// 主循环：采集任务 + 每个账户独立任务，同进程并行。
+    /// 主循环：采集任务 + 每个账户独立任务 + Web 界面，同进程并行。
     pub async fn run(self) -> anyhow::Result<()> {
         let mut handles = Vec::new();
+
+        // Web 界面（同进程，端口用环境变量 FINBOX_BIND，默认 0.0.0.0:8000）
+        let cfg_web = self.cfg.clone();
+        handles.push(tokio::spawn(async move {
+            let bind = std::env::var("FINBOX_BIND").unwrap_or_else(|_| "0.0.0.0:8000".into());
+            crate::web::serve(&cfg_web, &bind).await.map_err(|e| anyhow::anyhow!("Web: {e}"))
+        }));
 
         // 账户任务
         let accounts = accounts::list_accounts(&self.cfg.data_dir)?;
@@ -85,8 +92,7 @@ impl Scheduler {
         // 等待所有任务（账户任务异常退出会让整个进程退出；采集任务常驻）
         for h in handles {
             if let Err(e) = h.await {
-                log::error!("账户任务失败: {e}");
-                return Err(anyhow::anyhow!("账户任务失败: {e}"));
+                log::error!("任务失败: {e}");
             }
         }
         let _ = collect_handle.await;

@@ -35,6 +35,16 @@ impl WebState {
     }
 }
 
+/// 启动 Web 服务（供 `run` 同进程调用或独立启动）。
+pub async fn serve(cfg: &Config, bind: &str) -> anyhow::Result<()> {
+    let state = WebState::new(cfg)?;
+    let app = router(state);
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    log::info!("Web 界面已启动: http://{bind}");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
 pub fn router(state: WebState) -> Router {
     Router::new()
         .route("/", get(overview))
