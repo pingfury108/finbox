@@ -54,4 +54,27 @@ impl Db {
         }
         Ok(out)
     }
+
+    /// 最近 N 条决策日志（任意状态，Web 展示用）。
+    pub fn recent_decision_logs(&self, limit: u32) -> Result<Vec<DecisionLog>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, ts_ms, model, context, raw_response, actions, status, note
+             FROM decision_logs ORDER BY ts_ms DESC LIMIT ?",
+        )?;
+        let mut rows = stmt.query(duckdb::params![limit as i64])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push(DecisionLog {
+                id: r.get(0)?,
+                ts_ms: r.get(1)?,
+                model: r.get(2)?,
+                context: r.get(3)?,
+                raw_response: r.get(4)?,
+                actions: r.get(5)?,
+                status: r.get(6)?,
+                note: r.get(7)?,
+            });
+        }
+        Ok(out)
+    }
 }

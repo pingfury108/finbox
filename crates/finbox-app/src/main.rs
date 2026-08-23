@@ -10,6 +10,7 @@
 
 mod config;
 mod scheduler;
+mod web;
 
 use clap::{Parser, Subcommand};
 use finbox_decision::{DecisionEngine, LlmConfig};
@@ -30,6 +31,12 @@ struct Cli {
 enum Cmd {
     /// 常驻运行：采集 + 决策 + 执行
     Run,
+    /// 启动 Web 界面（axum）
+    Serve {
+        /// 监听地址
+        #[arg(long, default_value = "0.0.0.0:8000")]
+        bind: String,
+    },
     /// 手动一轮决策（打印意图，不下单）
     Decide,
     /// 查询账户
@@ -66,6 +73,14 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Run => {
             let mut s = Scheduler::new(cfg)?;
             s.run().await?;
+        }
+        Cmd::Serve { bind } => {
+            let db = open_shared(&cfg.db_path)?;
+            let state = web::WebState { db, cfg: cfg.clone() };
+            let app = web::router(state);
+            let listener = tokio::net::TcpListener::bind(&bind).await?;
+            log::info!("Web 界面已启动: http://{bind}");
+            axum::serve(listener, app).await?;
         }
         Cmd::Decide => {
             let (_db, engine, _broker) = engine_from_cfg(&cfg)?;

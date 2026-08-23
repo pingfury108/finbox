@@ -18,6 +18,7 @@ use duckdb::{params, Config, Connection};
 pub mod trading;
 pub mod market;
 pub mod decision;
+pub mod review;
 
 pub use decision::*;
 pub use market::*;
@@ -192,6 +193,21 @@ CREATE TABLE IF NOT EXISTS decision_logs (
     actions      VARCHAR,
     status       VARCHAR NOT NULL,
     note         VARCHAR
+);
+CREATE TABLE IF NOT EXISTS account_snapshots (
+    id           INTEGER PRIMARY KEY DEFAULT nextval('trades_id_seq'),
+    ts_ms        BIGINT NOT NULL,
+    cash         DOUBLE NOT NULL,
+    market_value DOUBLE NOT NULL,
+    total_asset  DOUBLE NOT NULL
+);
+CREATE TABLE IF NOT EXISTS reviews (
+    id          INTEGER PRIMARY KEY DEFAULT nextval('trades_id_seq'),
+    decision_id INTEGER NOT NULL,
+    days_after  INTEGER NOT NULL,
+    ts_ms       BIGINT NOT NULL,
+    summary     VARCHAR,
+    pnl         DOUBLE
 );
 "#;
 

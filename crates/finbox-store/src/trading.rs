@@ -199,7 +199,7 @@ impl Db {
         Ok(out)
     }
 
-    fn last_insert_rowid(&self) -> i64 {
+    pub(crate) fn last_insert_rowid(&self) -> i64 {
         self.conn
             .query_row("SELECT last_insert_rowid()", [], |r| r.get(0))
             .unwrap_or(0)

@@ -137,7 +137,13 @@ impl Scheduler {
     async fn snapshot_account(&self) -> anyhow::Result<()> {
         let acct = self.broker.account().await?;
         let total = self.db.lock().unwrap().total_asset(&acct)?;
-        log::info!("收盘快照: 现金 {:.2} 总资产 {:.2}", acct.cash, total);
+        let mv = total - acct.cash;
+        let ts = chrono::Utc::now().timestamp_millis();
+        self.db
+            .lock()
+            .unwrap()
+            .insert_account_snapshot(ts, acct.cash, mv, total)?;
+        log::info!("收盘快照已落库: 现金 {:.2} 市值 {:.2} 总资产 {:.2}", acct.cash, mv, total);
         Ok(())
     }
 }

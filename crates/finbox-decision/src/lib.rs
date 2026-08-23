@@ -114,8 +114,12 @@ impl DecisionEngine {
             }
         };
 
-        let intents = llm::to_intents(&parsed.actions);
+        let mut intents = llm::to_intents(&parsed.actions);
         let log = self.log_decision(&ctx, &raw, &parsed.actions_json, "parsed", &parsed.comment);
+        // 决策与成交关联：意图带上决策日志 id
+        for i in intents.iter_mut() {
+            i.decision_id = Some(log);
+        }
         Ok(DecisionResult {
             intents,
             status: "parsed".into(),
