@@ -141,9 +141,24 @@ impl Db {
         Ok(v > 0)
     }
 
+    /// 按代码/名称模糊搜索标的（市场行情库）。返回 (thscode, name, ticker)。
+    pub fn search_tickers(&self, q: &str, limit: u32) -> Result<Vec<(String, String, String)>> {
+        let like = format!("%{q}%");
+        let mut stmt = self.conn.prepare(
+            "SELECT thscode, name, ticker FROM tickers
+             WHERE thscode LIKE ? OR name LIKE ? OR ticker LIKE ?
+             ORDER BY thscode LIMIT ?",
+        )?;
+        let mut rows = stmt.query(duckdb::params![&like, &like, &like, limit as i64])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push((r.get(0)?, r.get(1)?, r.get(2)?));
+        }
+        Ok(out)
+    }
+
     /// 代码表查询名称。
-    pub fn ticker_name(&self, thscode: &str) -> Result<String> {
-        let v: String = self.conn.query_row(
+    pub fn ticker_name(&self, thscode: &str) -> Result<String> {        let v: String = self.conn.query_row(
             "SELECT name FROM tickers WHERE thscode = ?",
             duckdb::params![thscode],
             |r| r.get(0),

@@ -8,6 +8,7 @@
 //! - `account <name> info`  账户概览
 
 mod accounts;
+mod api;
 mod config;
 mod scheduler;
 mod web;

@@ -269,6 +269,28 @@ impl Db {
         Ok(Self { conn })
     }
 
+    /// 从旧库（混合格式）迁移行情表到当前库（market 库用）。
+    /// 使用 ATTACH + INSERT SELECT 跨库拷贝，行情表全量迁移。
+    pub fn execute_migrate(&self, source: impl AsRef<Path>) -> Result<()> {
+        let src = sql_str(source.as_ref());
+        self.conn.execute_batch(&format!(
+            "ATTACH {src} AS olddb (READ_ONLY);
+             INSERT INTO tickers SELECT thscode, ticker, name, exchange, asset_type, currency FROM olddb.tickers ON CONFLICT DO NOTHING;
+             INSERT INTO trading_days SELECT date, date_ms FROM olddb.trading_days ON CONFLICT DO NOTHING;
+             INSERT INTO daily_bars SELECT thscode, date_ms, date, open_price, high_price, low_price, close_price, volume, turnover FROM olddb.daily_bars ON CONFLICT DO NOTHING;
+             INSERT INTO snapshots SELECT ts_ms, thscode, last_price, price_change, price_change_ratio_pct, open_price, high_price, low_price, prev_price, volume, turnover FROM olddb.snapshots ON CONFLICT DO NOTHING;
+             INSERT INTO adjustment_events SELECT thscode, ex_date_ms, dividend_per_share, per_share_bonus, allotment_ratio, allotment_price FROM olddb.adjustment_events ON CONFLICT DO NOTHING;
+             DETACH olddb;"
+        ))?;
+        Ok(())
+    }
+
+    /// 表行数（迁移验证用）。
+    pub fn count_rows(&self, table: &str) -> Result<i64> {
+        let sql = format!("SELECT COUNT(*) FROM {table}");
+        Ok(self.conn.query_row(&sql, [], |r| r.get::<_, i64>(0))?)
+    }
+
     fn open_with_schema(path: impl AsRef<Path>, schema: &str) -> Result<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
