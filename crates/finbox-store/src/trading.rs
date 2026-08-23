@@ -91,11 +91,11 @@ impl Db {
         Ok(())
     }
 
-    /// 追加成交流水。
+    /// 追加成交流水，返回 id。
     pub fn insert_trade(&self, t: &Trade) -> Result<i64> {
-        self.conn.execute(
+        let id: i64 = self.conn.query_row(
             "INSERT INTO trades (thscode, name, side, price, quantity, amount, fee, decision_id, ts_ms)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
             duckdb::params![
                 t.thscode,
                 t.name,
@@ -107,8 +107,9 @@ impl Db {
                 t.decision_id,
                 chrono::Utc::now().timestamp_millis(),
             ],
+            |r| r.get(0),
         )?;
-        Ok(self.last_insert_rowid())
+        Ok(id)
     }
 
     /// 当日买入数量（T+1 校验用）。`start_ms`/`end_ms` 为当日 00:00~次日 00:00（Asia/Shanghai）毫秒戳。
@@ -175,6 +176,40 @@ impl Db {
         Ok(v)
     }
 
+    /// 某只持仓最近一次买入时间（毫秒），用于持仓天数/超期清仓判断。
+    pub fn position_bought_at(&self, thscode: &str) -> Result<Option<i64>> {
+        let v: Option<i64> = self.conn.query_row(
+            "SELECT MAX(ts_ms) FROM trades WHERE thscode = ? AND side = 'BUY'",
+            duckdb::params![thscode],
+            |r| r.get(0),
+        )?;
+        Ok(v)
+    }
+
+    /// 某次决策关联的成交。
+    pub fn trades_for_decision(&self, decision_id: i64) -> Result<Vec<RecentTrade>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT thscode, name, side, price, quantity, amount, fee, ts_ms
+             FROM trades WHERE decision_id = ? ORDER BY ts_ms",
+        )?;
+        let mut rows = stmt.query(duckdb::params![decision_id])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            let side: String = r.get(2)?;
+            out.push(RecentTrade {
+                thscode: r.get(0)?,
+                name: r.get(1)?,
+                side: if side == "BUY" { finbox_core::OrderSide::Buy } else { finbox_core::OrderSide::Sell },
+                price: r.get(3)?,
+                quantity: r.get::<_, i64>(4)? as u32,
+                amount: r.get(5)?,
+                fee: r.get(6)?,
+                ts_ms: r.get(7)?,
+            });
+        }
+        Ok(out)
+    }
+
     /// 最近 N 条成交流水（时间倒序）。
     pub fn recent_trades(&self, limit: u32) -> Result<Vec<RecentTrade>> {
         let mut stmt = self.conn.prepare(
@@ -197,12 +232,6 @@ impl Db {
             });
         }
         Ok(out)
-    }
-
-    pub(crate) fn last_insert_rowid(&self) -> i64 {
-        self.conn
-            .query_row("SELECT last_insert_rowid()", [], |r| r.get(0))
-            .unwrap_or(0)
     }
 
     /// 测试辅助：把某标的全部买入记录回拨到昨日，用于绕过 T+1 校验。

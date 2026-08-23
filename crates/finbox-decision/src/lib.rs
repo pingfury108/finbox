@@ -64,11 +64,11 @@ impl DecisionEngine {
     }
 
     /// 执行一轮决策：初筛 → 上下文 → LLM → 意图。
-    /// `is_trading_time` 由调用方（调度器）告知，非交易时段用昨日候选并禁止下单由 Broker 兜底。
-    pub async fn decide(&self, screen_top_n: u32) -> Result<DecisionResult, DecisionError> {
+    /// `candidate_count` 为初筛输出候选数（少而精，建议 3-5）。
+    pub async fn decide(&self, candidate_count: usize) -> Result<DecisionResult, DecisionError> {
         let (_, ctx) = {
             let db = self.db.lock().unwrap();
-            let candidates = screen::screen(&db, screen_top_n)?;
+            let candidates = screen::screen(&db, candidate_count)?;
             let ctx = context::build_context(&db, &self.watchlist, &candidates)?;
             (candidates, ctx)
         };

@@ -3,8 +3,10 @@
 //! [`Broker`] trait 按「第三方真实券商」的形态设计：模拟盘（[`SimBroker`]）
 //! 与未来实盘券商实现同一接口，决策层只面向 `Broker`，切换实现零改动。
 
+pub mod risk;
 pub mod sim;
 
+pub use risk::{RiskConfig, RiskManager, RiskReport};
 pub use sim::SimBroker;
 
 use finbox_core::{Account, Execution, OrderIntent, Position, RejectReason};

@@ -137,7 +137,7 @@ async fn decisions_page(State(st): State<WebState>) -> impl IntoResponse {
 #[derive(Deserialize)]
 struct ConfigForm {
     initial_capital: f64,
-    screen_top_n: u32,
+    candidate_count: usize,
     collect_interval_seconds: u64,
     ai_decision_interval_minutes: u64,
     llm_base_url: String,
@@ -151,14 +151,14 @@ async fn config_page(State(st): State<WebState>) -> impl IntoResponse {
         r#"<h2>配置（保存后写入 .env，重启生效）</h2>
         <form method=post>
         <table><tr><td>初始资金</td><td><input name=initial_capital value="{0}" type=number step=1000></td></tr>
-        <tr><td>初筛 Top N</td><td><input name=screen_top_n value="{1}" type=number></td></tr>
+        <tr><td>候选数(少而精)</td><td><input name=candidate_count value="{1}" type=number></td></tr>
         <tr><td>采集间隔(秒)</td><td><input name=collect_interval_seconds value="{2}" type=number></td></tr>
         <tr><td>决策间隔(分钟)</td><td><input name=ai_decision_interval_minutes value="{3}" type=number></td></tr>
         <tr><td>LLM Base URL</td><td><input name=llm_base_url value="{4}" style=width:320px></td></tr>
         <tr><td>LLM 模型</td><td><input name=llm_model value="{5}" style=width:200px></td></tr>
         <tr><td>自选池(逗号分隔)</td><td><input name=watchlist value="{6}" style=width:320px></td></tr>
         </table><p><button type=submit>保存</button></p></form>"#,
-        c.initial_capital, c.screen_top_n, c.collect_interval_seconds,
+        c.initial_capital, c.candidate_count, c.collect_interval_seconds,
         c.ai_decision_interval_minutes, esc(&c.llm_base_url), esc(&c.llm_model), esc(&c.watchlist.join(","))
     );
     layout("配置", &body)
@@ -173,7 +173,7 @@ async fn save_config(
         &st.cfg.db_path,
         &[
             ("INITIAL_CAPITAL", &form.initial_capital.to_string()),
-            ("SCREEN_TOP_N", &form.screen_top_n.to_string()),
+            ("CANDIDATE_COUNT", &form.candidate_count.to_string()),
             ("COLLECT_INTERVAL_SECONDS", &form.collect_interval_seconds.to_string()),
             ("AI_DECISION_INTERVAL_MINUTES", &form.ai_decision_interval_minutes.to_string()),
             ("LLM_BASE_URL", &form.llm_base_url),

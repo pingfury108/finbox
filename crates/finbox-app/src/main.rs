@@ -84,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Decide => {
             let (_db, engine, _broker) = engine_from_cfg(&cfg)?;
-            let result = engine.decide(cfg.screen_top_n).await?;
+            let result = engine.decide(cfg.candidate_count).await?;
             println!("状态: {}", result.status);
             println!("备注: {}", result.note);
             for i in &result.intents {

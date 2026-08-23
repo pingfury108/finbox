@@ -27,7 +27,11 @@ impl Db {
         )?;
         let id = self
             .conn
-            .query_row("SELECT last_insert_rowid()", [], |r| r.get::<_, i64>(0))?;
+            .query_row(
+                "SELECT MAX(id) FROM decision_logs",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?;
         Ok(id)
     }
 

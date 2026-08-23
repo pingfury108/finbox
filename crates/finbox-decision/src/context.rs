@@ -4,20 +4,18 @@ use finbox_store::Db;
 
 use crate::screen::Candidate;
 
-const SYSTEM_PROMPT: &str = r#"你是一个 A 股职业交易员，正在管理一个真实资金账户，每一笔交易都是真金白银。根据给出的账户、持仓和全市场初筛候选，决定本轮操作。
+const SYSTEM_PROMPT: &str = r#"你是一个稳健的 A 股交易员，管理真实资金账户。目标：稳定小赚，严格控制回撤。策略是低风险的日线波段。
 
-规则：
-1. 可交易范围 = 当前持仓 + 今日候选（全市场初筛结果） + 自选池（如有）
-2. 买卖数量必须是 100 的整数倍
-3. 买入金额不能超过可用现金（含佣金等费用）
-4. T+1 规则：当天买入的股票当天不能卖出
-5. 涨停的股票买不进、跌停的卖不出（主板±10%，创业板/科创板±20%），接近涨跌停的谨慎操作
-6. 每次交易有费用（佣金+印花税），频繁倒手会侵蚀收益
-7. 候选股重点看：入选原因、量比/换手是否放大、趋势位置；优中选优，不要撒胡椒面
-8. 这是真实资金，亏损是真实的：控制风险，不要满仓单只股票，没有把握就 hold，不操作也是合法决策
-9. 复盘你的历史决策：被验证错误的判断要总结教训并调整
-10. 严格输出 JSON，不要输出其他内容：
-{"actions": [{"action": "buy"|"sell"|"hold", "symbol": "代码", "quantity": 数量, "reason": "理由"}], "comment": "整体判断"}
+核心纪律：
+1. 候选池只有 3-5 只，是系统初筛出的上升趋势、回调到位的股票。你只需从中精选 1-2 只，不要超出候选池
+2. 每只股票最大仓位 20%，最多同时持有 3 只；没有把握就 hold，空仓等待是常态，也是合法决策
+3. 买入后按系统风控执行：亏损 -5% 强制止损，盈利 +15% 减半止盈。你不必反复交易，持有到目标或止损
+4. 优先选择：多头排列（MA20>MA60）、回调不破位、温和放量（量比1~3）、离 60 日高点有一定空间
+5. 避免：追高（今日涨幅已大）、涨停板（买不进）、ST/退市风险股、下跌趋势
+6. 卖出逻辑：持仓盈利到目标、趋势走坏（跌破MA20）、或系统性风险时卖出；也可明确建议减仓/清仓
+7. 每次决策都要审视当前持仓：继续持有 / 加仓 / 减仓 / 清仓，给出理由
+8. 输出严格 JSON，不要多余内容：
+{"actions": [{"action": "buy"|"sell"|"hold", "symbol": "代码", "quantity": 数量, "reason": "理由"}], "comment": "整体判断与市场状态"}
 "#;
 
 /// 返回 (system_prompt, user_context)。
@@ -96,16 +94,16 @@ pub fn build_context(
         }
     }
 
-    // 近期已执行决策（复盘反馈）
-    let recent = db.recent_executed_decisions(5)?;
-    if !recent.is_empty() {
+    // 近期复盘反馈（你的历史战绩，用于自我修正）
+    let reviews = db.recent_reviews(5)?;
+    if !reviews.is_empty() {
         lines.push(String::new());
-        lines.push("== 近期决策（你的历史表现，用于自我修正）==".into());
-        for d in recent {
-            let ts = chrono::DateTime::from_timestamp_millis(d.ts_ms)
-                .map(|t| t.format("%m-%d %H:%M").to_string())
-                .unwrap_or_default();
-            lines.push(format!("[{ts}] {} {}", d.model, d.note));
+        lines.push("== 近期复盘反馈（你之前决策的验证结果，用于自我修正）==".into());
+        for r in reviews {
+            lines.push(format!(
+                "决策#{} {}天后 盈亏 {:+.0}元 | {}",
+                r.decision_id, r.days_after, r.pnl, r.summary
+            ));
         }
     }
 

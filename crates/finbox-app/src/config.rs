@@ -11,8 +11,8 @@ pub struct Config {
     pub initial_capital: f64,
     /// 自选池（逗号分隔 thscode）
     pub watchlist: Vec<String>,
-    /// 初筛每维度 Top N
-    pub screen_top_n: u32,
+    /// 初筛输出候选数（少而精）
+    pub candidate_count: usize,
     /// 行情采集间隔（秒）
     pub collect_interval_seconds: u64,
     /// AI 决策间隔（分钟）
@@ -31,7 +31,7 @@ impl Default for Config {
             db_path: "data/finbox.duckdb".into(),
             initial_capital: 200_000.0,
             watchlist: vec![],
-            screen_top_n: 20,
+            candidate_count: 5,
             collect_interval_seconds: 60,
             ai_decision_interval_minutes: 30,
             llm_base_url: "https://api.deepseek.com".into(),
@@ -53,7 +53,7 @@ impl Config {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
-            screen_top_n: env_u64("SCREEN_TOP_N", Self::default().screen_top_n as u64) as u32,
+            candidate_count: env_u64("CANDIDATE_COUNT", Self::default().candidate_count as u64) as usize,
             collect_interval_seconds: env_u64("COLLECT_INTERVAL_SECONDS", Self::default().collect_interval_seconds),
             ai_decision_interval_minutes: env_u64("AI_DECISION_INTERVAL_MINUTES", Self::default().ai_decision_interval_minutes),
             llm_base_url: env_str("LLM_BASE_URL", &Self::default().llm_base_url),

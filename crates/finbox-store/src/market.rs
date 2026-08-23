@@ -92,7 +92,118 @@ pub struct VolumeRatio {
     pub ratio: f64,
 }
 
+/// 初筛因子行（由 `market_screen_rows` 单条 SQL 产出）。
+#[derive(Debug, Clone)]
+pub struct ScreenRow {
+    pub thscode: String,
+    pub price: f64,
+    pub pct: f64,
+    pub turnover: f64,
+    pub ma20: f64,
+    pub ma60: f64,
+    /// 近 5 日涨幅（%）
+    pub chg5: f64,
+    pub volume_ratio: Option<f64>,
+    /// 当前价在 60 日高低点位置（0~1）
+    pub position: Option<f64>,
+}
+
 impl Db {
+    /// 全市场初筛行：单条 SQL 用窗口函数计算全部打分因子，避免逐只查询。
+    ///
+    /// 对每只股票返回：最新快照价/涨幅/成交额 + MA20/MA60/60日高低点位置/近5日涨幅/量比。
+    pub fn market_screen_rows(&self) -> Result<Vec<ScreenRow>> {
+        let mut stmt = self.conn.prepare(
+            r#"WITH ranked AS (
+                SELECT thscode, date_ms, close_price, high_price, low_price, volume, turnover,
+                       ROW_NUMBER() OVER (PARTITION BY thscode ORDER BY date_ms DESC) AS rn,
+                       COUNT(*)  OVER (PARTITION BY thscode) AS total_bars
+                FROM daily_bars
+            ),
+            per AS (
+                SELECT thscode,
+                       MAX(CASE WHEN rn = 1 THEN close_price END) AS last_close,
+                       MAX(CASE WHEN rn = 1 THEN turnover END) AS last_turnover,
+                       MAX(total_bars) AS total_bars,
+                       SUM(CASE WHEN rn <= 5  THEN close_price END) / 5.0 AS ma5,
+                       SUM(CASE WHEN rn <= 20 THEN close_price END) / 20.0 AS ma20,
+                       AVG(close_price) AS ma60,
+                       MIN(low_price) AS min60,
+                       MAX(high_price) AS max60,
+                       SUM(CASE WHEN rn = 6 THEN close_price END) AS close6,
+                       AVG(CASE WHEN rn BETWEEN 2 AND 6 THEN turnover END) AS avg5_turnover
+                FROM ranked
+                WHERE rn <= 60
+                GROUP BY thscode
+            )
+            SELECT p.thscode, p.last_close, p.last_turnover, p.ma20, p.ma60,
+                   p.min60, p.max60, p.close6, p.avg5_turnover,
+                   s.price_change_ratio_pct
+            FROM per p
+            LEFT JOIN (
+                SELECT thscode, price_change_ratio_pct, turnover
+                FROM snapshots
+                QUALIFY ROW_NUMBER() OVER (PARTITION BY thscode ORDER BY ts_ms DESC) = 1
+            ) s ON p.thscode = s.thscode
+            WHERE p.total_bars >= 60 AND p.last_close IS NOT NULL"#,
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            let last_close: Option<f64> = r.get(1)?;
+            let last_turnover: Option<f64> = r.get(2)?;
+            let ma20: Option<f64> = r.get(3)?;
+            let ma60: Option<f64> = r.get(4)?;
+            let min60: Option<f64> = r.get(5)?;
+            let max60: Option<f64> = r.get(6)?;
+            let close6: Option<f64> = r.get(7)?;
+            let avg5_turnover: Option<f64> = r.get(8)?;
+            let pct: Option<f64> = r.get(9)?;
+            let Some(last_close) = last_close else { continue };
+            let pct = pct.unwrap_or(0.0);
+            let chg5 = close6.map(|c6| (last_close / c6 - 1.0) * 100.0).unwrap_or(0.0);
+            let volume_ratio = match (avg5_turnover, last_turnover) {
+                (Some(a), Some(l)) if a > 0.0 => Some(l / a),
+                _ => None,
+            };
+            let position = match (min60, max60) {
+                (Some(lo), Some(hi)) if hi > lo => Some((last_close - lo) / (hi - lo)),
+                _ => None,
+            };
+            out.push(ScreenRow {
+                thscode: r.get(0)?,
+                price: last_close,
+                pct,
+                turnover: last_turnover.unwrap_or(0.0),
+                ma20: ma20.unwrap_or(0.0),
+                ma60: ma60.unwrap_or(0.0),
+                chg5,
+                volume_ratio,
+                position,
+            });
+        }
+        Ok(out)
+    }
+
+    /// 市场涨跌家数：上涨家数 / 总家数（基于最新快照涨跌幅）。
+    pub fn market_breadth(&self) -> Result<(u32, u32)> {
+        let (up, total) = self.conn.query_row(
+            "SELECT
+                COUNT(*) FILTER (WHERE pct > 0),
+                COUNT(*)
+             FROM (
+                SELECT s.price_change_ratio_pct AS pct
+                FROM snapshots s
+                JOIN (SELECT thscode, MAX(ts_ms) AS m FROM snapshots GROUP BY thscode) t
+                  ON s.thscode = t.thscode AND s.ts_ms = t.m
+                WHERE s.last_price > 0
+             )",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )?;
+        Ok((up as u32, total as u32))
+    }
+
     /// 全市场量比，单条 SQL（窗口函数），避免逐只查询。
     pub fn market_volume_ratios(&self) -> Result<Vec<VolumeRatio>> {
         let mut stmt = self.conn.prepare(

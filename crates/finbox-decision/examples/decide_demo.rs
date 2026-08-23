@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
         .collect();
 
     let engine = DecisionEngine::new(db, config, watchlist);
-    let result = engine.decide(20).await?;
+    let result = engine.decide(5).await?;
 
     println!("决策状态: {}", result.status);
     println!("备注: {}", result.note);
