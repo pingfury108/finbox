@@ -1,35 +1,56 @@
 # finbox
 
-AI 选股的 A 股模拟交易系统：分钟级抓取真实行情落库，LLM（DeepSeek）自动选股模拟买卖，全程记录决策理由并复盘验证。
+AI 选股的 A 股模拟交易系统（Rust 版）。目标：稳定小赚（5%），严格控制回撤（≤5%）。
 
-## 架构
+- 数据：同花顺（hithink-sdk）全市场行情落本地 DuckDB
+- 决策：每日收盘 AI（DeepSeek）从精品候选选股，决策与执行解耦
+- 风控：单票止损 -5%、止盈 +15%、账户回撤 -5% 熔断，独立于 AI 不可绕过
+- 执行：模拟盘严格按 A 股规则（T+1/涨跌停/整手/费用），真实行情价成交
+- Web：深色行情界面，账户概览 / K线行情 / 持仓 / 交易 / AI建议 / 设置
 
-- **collector** — AkShare 实时行情，交易时段每分钟落库
-- **engine** — 模拟交易引擎，成交价 = 真实行情价（钱是假的，价格是真的）
-- **decision** — OpenAI 兼容接口（默认 DeepSeek），每 30 分钟决策一次，输入上下文 + 原始输出 + 动作全留痕
-- **review** — 每日收盘账户快照；决策 1 天 / 5 天后自动验证对错
-- **web** — FastAPI + Jinja2：概览 / 交易记录 / AI 决策日志
-- **db** — SQLite + Alembic 迁移，改表不丢历史数据
+## 架构（Cargo workspace）
+
+```
+crates/
+├── hithink-sdk        同花顺 REST API SDK（信封/重试/流式下载/指数K线）
+├── finbox-store       DuckDB：行情库 + 账户库（SharedDb 单连接共享）
+├── finbox-core        领域模型 + A股规则（T+1/涨跌停/整手/费用/护栏）
+├── finbox-collector   数据采集同步 CLI（init/sync/index/snapshot/...）
+├── finbox-trader      Broker trait + SimBroker + 风控层
+├── finbox-decision    全市场初筛（SQL打分）+ LLM 决策（意图解耦）
+└── finbox-app         主程序：单进程调度（采集 + 多账户）+ Web
+```
+
+数据目录：`data/market.duckdb`（共享行情）+ `data/accounts/<名>/account.duckdb`（每账户独立，互不干扰）。
 
 ## 快速开始
 
 ```bash
-uv sync
-cp .env.example .env   # 填入 LLM_API_KEY，按需修改 WATCHLIST
-uv run alembic upgrade head
-uv run uvicorn finbox.main:app --host 0.0.0.0 --port 8000
-```
+# 1. 初始化行情库（全市场 10 年日K + 复权 + 指数）
+cp .env.example .env    # 填 HITHINK_FINANCE_API_KEY / LLM_API_KEY
+cargo run -p finbox-collector -- init
+cargo run -p finbox-collector -- index --days 1200
 
-已初始化过数据库的，拉取新代码后执行 `uv run alembic upgrade head` 即可，历史数据不丢失。
+# 2. 创建模拟账户
+cargo run -p finbox-app -- account create 我的账户 --capital 200000
+
+# 3. 启动（常驻调度 + Web）
+cargo run -p finbox-app -- run --serve --bind 0.0.0.0:8000
+# 或仅 Web：cargo run -p finbox-app -- serve
+```
 
 打开 http://localhost:8000
 
 ## 说明
 
-- AI 面向**全市场**选股：每轮决策先对全 A 快照初筛（涨幅/量比/60日涨幅 各取 Top N），AI 从候选 + 持仓中精选；新候选自动回填日线历史
-- 自选池 `WATCHLIST` 可选；模拟交易**严格限定真实交易时段**下单（工作日 9:30-11:30 / 13:00-15:00，未排除法定节假日）
-- 非交易时段若当天还没采过数据，会自动补一次最近收盘价（首次启动即生效）；手动「立即决策」非交易时段只记录分析、不下单
-- 启动时自动补齐最近 HISTORY_DAYS 天日线历史（默认 250，前复权），供 AI 分析趋势；之后每交易日 9:15 刷新
-- AI 只会交易 `WATCHLIST` 自选池 + 已持仓的股票
-- 未配置 `LLM_API_KEY` 时照常采集行情，AI 决策会被跳过并记录
-- 数据库变更：`uv run alembic revision --autogenerate -m "xxx"` 后 `uv run alembic upgrade head`
+- **选股**：单条 SQL 全市场打分（趋势/回调/放量/位置 + 硬过滤），只出 3-5 只精品候选给 AI
+- **决策**：每日收盘一次（15:05），AI 从候选精选 1-2 只，数量由系统按仓位约束计算（单票≤20%、总仓位≤60%、持仓≤3）
+- **风控**（独立于 AI）：单票 -5% 强制止损；+15% 减半止盈；持仓超 20 天无起色清仓；账户回撤 -5% 熔断停买 5 天；市场走弱（涨跌家数）自动降仓位
+- **复盘**：决策 1/5/10 天后验证盈亏，反馈喂回下一轮 AI 上下文
+- **多账户**：每个账户独立资金/持仓/决策，单进程并行运行，互不干扰；Web 顶部切换账户
+- **配置热生效**：同花顺 key / AI key / 策略参数存库 meta，Web 设置页修改即时生效，无需重启
+- 行情页默认展示几大 A 股指数 K 线（上证/深成/创业板/沪深300/中证500），可搜索个股
+
+## 环境变量
+
+见 `.env.example`：`HITHINK_FINANCE_API_KEY`（同花顺数据）、`LLM_*`（AI 服务）、`FINBOX_DATA`（数据目录，默认 data）。

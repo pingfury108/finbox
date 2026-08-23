@@ -1,10 +1,6 @@
-__pycache__/
-*.pyc
-.venv/
 .env
 *.db
 *.db-shm
 *.db-wal
-.ruff_cache/
 target/
 data/
