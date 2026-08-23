@@ -144,6 +144,22 @@ impl Client {
         }
         self.get("/api/a-share/corporate-actions/adjustment-factors", &query).await
     }
+
+    /// 单只指数/板块历史日 K（无复权概念）。`start`/`end` 为毫秒时间戳，窗口 ≤ 10 年。
+    pub async fn index_price_historical(
+        &self,
+        thscode: &str,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<HistoricalData> {
+        let query = vec![
+            ("thscode", thscode.to_string()),
+            ("interval", "1d".to_string()),
+            ("start", start_ms.to_string()),
+            ("end", end_ms.to_string()),
+        ];
+        self.get("/api/a-share-index/prices/historical", &query).await
+    }
 }
 
 #[cfg(test)]

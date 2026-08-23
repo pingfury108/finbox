@@ -49,6 +49,9 @@ pub fn router(state: WebState) -> Router {
         .route("/api/kline/{code}", get(api::kline))
         .route("/api/accounts", get(api::accounts))
         .route("/api/account/{name}/equity", get(api::equity))
+        .route("/api/account/{name}/positions", get(api::positions))
+        .route("/api/account/{name}/trades", get(api::trades))
+        .route("/api/account/{name}/decisions", get(api::decisions))
         // 静态资源（echarts 等）
         .nest_service("/static", ServeDir::new("crates/finbox-app/static"))
         .with_state(state)
@@ -75,6 +78,7 @@ fn layout(title: &str, active: &str, body: &str) -> Html<String> {
 </header>
 <main class="content">{body}</main>
 <footer class="foot">finbox · 模拟盘数据仅供学习，非投资建议</footer>
+<script src="/static/echarts.min.js"></script>
 <script>window.ACTIVE_ACCT = localStorage.getItem('finbox_acct') || '';</script>
 <script src="/static/app.js"></script>
 </body></html>"#,
@@ -117,16 +121,16 @@ async fn overview(State(_st): State<WebState>) -> impl IntoResponse {
 
 // ---- 行情页（K线）----
 async fn market_page() -> impl IntoResponse {
-    let body = r#"
-<div class="panel">
-  <div class="searchbar">
-    <input id="sym-search" placeholder="输入代码或名称，如 600519 / 贵州茅台" autocomplete="off">
+    let body = r#"<div class="panel">
+  <div class="index-tabs" id="index-tabs"></div>
+  <div class="searchbar" style="margin-top:12px">
+    <input id="sym-search" placeholder="搜索个股：输入代码或名称，如 600519 / 贵州茅台" autocomplete="off">
     <div id="sym-suggest" class="suggest"></div>
   </div>
 </div>
 <section class="panel">
   <div class="kline-head">
-    <h2 id="kline-name">选择一只股票</h2>
+    <h2 id="kline-name">加载中…</h2>
     <span id="kline-quote" class="quote"></span>
   </div>
   <div id="kline-chart" class="chart chart-lg"></div>

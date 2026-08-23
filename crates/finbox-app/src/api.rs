@@ -145,6 +145,106 @@ pub async fn equity(
     Ok(Json(snaps.into_iter().map(|s| EquityPoint { ts: s.ts_ms, total: s.total_asset }).collect()))
 }
 
+/// 持仓行（含现价与浮动盈亏，价格读行情库）。
+#[derive(Serialize)]
+pub struct PositionRow {
+    pub thscode: String,
+    pub name: String,
+    pub quantity: u32,
+    pub avg_cost: f64,
+    pub price: f64,
+    pub pnl: f64,
+    pub pnl_pct: f64,
+}
+
+/// 账户持仓（带最新价与浮动盈亏）。
+pub async fn positions(
+    State(st): State<WebState>,
+    Path(name): Path<String>,
+) -> Result<Json<Vec<PositionRow>>, axum::http::StatusCode> {
+    let acct = accounts::open_account(&st.cfg.data_dir, &name).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+    let positions = acct.lock().unwrap().positions().map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+    let mut out = Vec::new();
+    {
+        let m = st.market.lock().unwrap();
+        for p in &positions {
+            let price = m.latest_snapshot_price(&p.thscode).ok().flatten().unwrap_or(p.avg_cost);
+            let pnl = (price - p.avg_cost) * p.quantity as f64;
+            let pnl_pct = if p.avg_cost > 0.0 { (price / p.avg_cost - 1.0) * 100.0 } else { 0.0 };
+            out.push(PositionRow {
+                thscode: p.thscode.clone(),
+                name: p.name.clone(),
+                quantity: p.quantity,
+                avg_cost: p.avg_cost,
+                price,
+                pnl,
+                pnl_pct,
+            });
+        }
+    }
+    Ok(Json(out))
+}
+
+/// 成交行。
+#[derive(Serialize)]
+pub struct TradeRow {
+    pub ts_ms: i64,
+    pub thscode: String,
+    pub name: String,
+    pub side: String,
+    pub quantity: u32,
+    pub price: f64,
+    pub amount: f64,
+    pub fee: f64,
+}
+
+/// 账户成交记录（最近 N 条）。
+pub async fn trades(
+    State(st): State<WebState>,
+    Path(name): Path<String>,
+) -> Result<Json<Vec<TradeRow>>, axum::http::StatusCode> {
+    let acct = accounts::open_account(&st.cfg.data_dir, &name).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+    let db = acct.lock().unwrap();
+    let rows = db.recent_trades(50).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+    Ok(Json(rows.into_iter().map(|t| TradeRow {
+        ts_ms: t.ts_ms,
+        thscode: t.thscode,
+        name: t.name,
+        side: t.side.as_str().into(),
+        quantity: t.quantity,
+        price: t.price,
+        amount: t.amount,
+        fee: t.fee,
+    }).collect()))
+}
+
+/// 决策行。
+#[derive(Serialize)]
+pub struct DecisionRow {
+    pub ts_ms: i64,
+    pub model: String,
+    pub status: String,
+    pub note: String,
+    pub raw_response: String,
+}
+
+/// 账户 AI 决策记录。
+pub async fn decisions(
+    State(st): State<WebState>,
+    Path(name): Path<String>,
+) -> Result<Json<Vec<DecisionRow>>, axum::http::StatusCode> {
+    let acct = accounts::open_account(&st.cfg.data_dir, &name).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+    let db = acct.lock().unwrap();
+    let rows = db.recent_decision_logs(50).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+    Ok(Json(rows.into_iter().map(|d| DecisionRow {
+        ts_ms: d.ts_ms,
+        model: d.model,
+        status: d.status,
+        note: d.note,
+        raw_response: d.raw_response,
+    }).collect()))
+}
+
 fn fmt_date(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
         .map(|t| t.format("%Y-%m-%d").to_string())

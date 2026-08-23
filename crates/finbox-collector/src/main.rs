@@ -10,8 +10,8 @@ use hithink_sdk::Client;
 #[derive(Parser)]
 #[command(name = "finbox-collector", about = "同花顺数据采集同步 -> DuckDB")]
 struct Cli {
-    /// DuckDB 数据库路径
-    #[arg(long, env = "FINBOX_DB", default_value = "data/finbox.duckdb")]
+    /// DuckDB 数据库路径（新架构：行情库 market.duckdb）
+    #[arg(long, env = "FINBOX_DB", default_value = "data/market.duckdb")]
     db: PathBuf,
 
     #[command(subcommand)]
@@ -37,6 +37,12 @@ enum Cmd {
     Calendar,
     /// 采集一次全市场行情快照
     Snapshot,
+    /// 采集几大 A 股指数日 K
+    Index {
+        /// 拉取天数
+        #[arg(long, default_value_t = 1200)]
+        days: u32,
+    },
     /// 库内统计
     Stats,
 }
@@ -81,6 +87,10 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Snapshot => {
             let n = c.collect_market_snapshot().await?;
             println!("快照: {n} 只标的");
+        }
+        Cmd::Index { days } => {
+            let n = c.sync_index_bars(days).await?;
+            println!("指数日K: 共写入 {n} 根");
         }
         Cmd::Stats => {
             let s = c.db.lock().unwrap().stats()?;

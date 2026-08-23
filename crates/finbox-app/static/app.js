@@ -71,19 +71,46 @@
     try { equity = await get('/api/account/' + encodeURIComponent(acct.name) + '/equity'); } catch (e) {}
     renderEquity(equity);
 
-    // 持仓 + 最近成交 + 决策 用服务端渲染太重，这里留空提示（数据经账户页/持仓页）
-    document.getElementById('ov-positions').querySelector('tbody').innerHTML =
-      acct.position_count === 0 ? '' : '<tr><td colspan=6 class="empty">详见「持仓」页</td></tr>';
-    document.getElementById('ov-pos-empty').style.display = acct.position_count === 0 ? '' : 'none';
-    document.getElementById('ov-trades').querySelector('tbody').innerHTML =
-      '<tr><td colspan=5 class="empty">详见「交易」页</td></tr>';
-    document.getElementById('ov-decisions').innerHTML =
-      '<div class="empty">详见「AI 建议」页</div>';
+    // 持仓
+    let positions = [];
+    try { positions = await get('/api/account/' + encodeURIComponent(acct.name) + '/positions'); } catch (e) {}
+    const ptb = document.querySelector('#ov-positions tbody');
+    document.getElementById('ov-pos-empty').style.display = positions.length === 0 ? '' : 'none';
+    ptb.innerHTML = positions.map(p =>
+      '<tr><td>' + p.thscode + '</td><td>' + esc(p.name) + '</td><td>' + p.quantity + '</td>' +
+      '<td>' + fmt(p.avg_cost) + '</td><td>' + fmt(p.price) + '</td>' +
+      '<td class="' + cls(p.pnl) + '">' + sign(p.pnl) + fmt(p.pnl, 0) + ' (' + pct(p.pnl_pct) + ')</td></tr>'
+    ).join('');
+
+    // 最近成交
+    let trades = [];
+    try { trades = await get('/api/account/' + encodeURIComponent(acct.name) + '/trades'); } catch (e) {}
+    document.querySelector('#ov-trades tbody').innerHTML = trades.slice(0, 8).map(t =>
+      '<tr><td>' + fmtTime(t.ts_ms) + '</td><td class="' + (t.side === 'BUY' ? 'up' : 'down') + '">' +
+      (t.side === 'BUY' ? '买入' : '卖出') + '</td><td>' + t.thscode + '</td><td>' + t.quantity +
+      '</td><td>' + fmt(t.price) + '</td></tr>'
+    ).join('') || '<tr><td colspan=5 class="empty">暂无成交</td></tr>';
+
+    // 最近 AI 建议
+    let decisions = [];
+    try { decisions = await get('/api/account/' + encodeURIComponent(acct.name) + '/decisions'); } catch (e) {}
+    document.getElementById('ov-decisions').innerHTML = decisions.slice(0, 5).map(d =>
+      '<div class="dec-item"><div class="meta">' + fmtTime(d.ts_ms) + ' · ' + esc(d.model) +
+      '<span class="status status-' + d.status + '">' + statusLabel(d.status) + '</span></div>' +
+      '<div class="note">' + esc(d.note) + '</div></div>'
+    ).join('') || '<div class="empty">暂无 AI 建议</div>';
 
     function card(label, value, vcls) {
       return '<div class="card"><div class="label">' + label + '</div>' +
         '<div class="value ' + (vcls || '') + '">' + value + '</div></div>';
     }
+  }
+
+  function statusLabel(s) {
+    return { parsed: '已解析', executed: '已执行', hold: '观望', rejected: '跳过', error: '出错' }[s] || s;
+  }
+  function fmtTime(ms) {
+    return new Date(ms).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
   }
 
   function renderEquity(pts) {
@@ -120,10 +147,34 @@
   }
 
   // ---------- 行情页（K线） ----------
+  // 几大 A 股指数
+  const INDEXES = [
+    { code: '000001.SH', name: '上证指数' },
+    { code: '399001.SZ', name: '深证成指' },
+    { code: '399006.SZ', name: '创业板指' },
+    { code: '000300.SH', name: '沪深300' },
+    { code: '000905.SH', name: '中证500' },
+  ];
+
   function initMarket() {
     const input = document.getElementById('sym-search');
     const suggest = document.getElementById('sym-suggest');
     if (!input) return;
+
+    // 指数切换条
+    const tabs = document.getElementById('index-tabs');
+    if (tabs) {
+      tabs.innerHTML = INDEXES.map((ix, i) =>
+        '<button class="index-tab' + (i === 0 ? ' active' : '') + '" data-code="' + ix.code + '">' + ix.name + '</button>'
+      ).join('');
+      tabs.addEventListener('click', e => {
+        const b = e.target.closest('.index-tab');
+        if (!b) return;
+        tabs.querySelectorAll('.index-tab').forEach(x => x.classList.remove('active'));
+        b.classList.add('active');
+        loadKline(b.dataset.code);
+      });
+    }
 
     let timer = null;
     input.addEventListener('input', () => {
@@ -144,18 +195,20 @@
       if (item) {
         input.value = item.dataset.code;
         suggest.style.display = 'none';
+        tabs && tabs.querySelectorAll('.index-tab').forEach(x => x.classList.remove('active'));
         loadKline(item.dataset.code);
       }
     });
     input.addEventListener('keydown', e => {
       if (e.key === 'Enter' && input.value.trim().length >= 4) {
+        tabs && tabs.querySelectorAll('.index-tab').forEach(x => x.classList.remove('active'));
         loadKline(input.value.trim().toUpperCase());
         suggest.style.display = 'none';
       }
     });
 
-    // 默认展示一只
-    loadKline('600519.SH');
+    // 默认展示上证指数
+    loadKline(INDEXES[0].code);
   }
 
   async function loadKline(code) {
@@ -167,7 +220,10 @@
       document.getElementById('kline-name').textContent = '未找到 ' + code;
       return;
     }
-    document.getElementById('kline-name').textContent = data.name + '（' + data.thscode + '）';
+    // 指数用中文名，个股用 API 返回名
+    const ix = INDEXES.find(i => i.code === code);
+    document.getElementById('kline-name').textContent =
+      (ix ? ix.name : data.name) + '（' + data.thscode + '）';
     const last = data.points[data.points.length - 1];
     if (last) {
       const chg = (last.ohlc[1] - last.ohlc[3]) / last.ohlc[3] * 100;
@@ -244,16 +300,53 @@
   async function renderPositions() {
     const tbody = document.querySelector('#pos-table tbody');
     if (!tbody) return;
-    // 持仓数据当前无 API，从账户页渲染；此处用占位
-    tbody.innerHTML = '<tr><td colspan=7 class="empty">持仓数据请查看概览页（交易时段自动更新）</td></tr>';
+    let positions = [];
+    try { positions = await get('/api/account/' + encodeURIComponent(activeAcct) + '/positions'); } catch (e) {}
+    document.getElementById('pos-empty').style.display = positions.length === 0 ? '' : 'none';
+    tbody.innerHTML = positions.map(p =>
+      '<tr><td>' + p.thscode + '</td><td>' + esc(p.name) + '</td><td>' + p.quantity + '</td>' +
+      '<td>' + fmt(p.avg_cost) + '</td><td>' + fmt(p.price) + '</td>' +
+      '<td class="' + cls(p.pnl) + '">' + sign(p.pnl) + fmt(p.pnl, 0) + '</td>' +
+      '<td class="' + cls(p.pnl_pct) + '">' + pct(p.pnl_pct) + '</td></tr>'
+    ).join('');
+  }
+
+  // ---------- 交易页 ----------
+  async function renderTrades() {
+    const tbody = document.querySelector('#trades-table tbody');
+    if (!tbody) return;
+    let trades = [];
+    try { trades = await get('/api/account/' + encodeURIComponent(activeAcct) + '/trades'); } catch (e) {}
+    tbody.innerHTML = trades.map(t =>
+      '<tr><td>' + fmtTime(t.ts_ms) + '</td>' +
+      '<td class="' + (t.side === 'BUY' ? 'up' : 'down') + '">' + (t.side === 'BUY' ? '买入' : '卖出') + '</td>' +
+      '<td>' + t.thscode + '</td><td>' + esc(t.name) + '</td><td>' + t.quantity + '</td>' +
+      '<td>' + fmt(t.price) + '</td><td>' + fmt(t.amount) + '</td><td>' + fmt(t.fee) + '</td></tr>'
+    ).join('') || '<tr><td colspan=8 class="empty">暂无成交记录</td></tr>';
+  }
+
+  // ---------- 决策页 ----------
+  async function renderDecisions() {
+    const list = document.getElementById('dec-list');
+    if (!list) return;
+    let decisions = [];
+    try { decisions = await get('/api/account/' + encodeURIComponent(activeAcct) + '/decisions'); } catch (e) {}
+    list.innerHTML = decisions.map(d =>
+      '<div class="dec-item"><div class="meta">' + fmtTime(d.ts_ms) + ' · ' + esc(d.model) +
+      '<span class="status status-' + d.status + '">' + statusLabel(d.status) + '</span></div>' +
+      '<div class="note">' + esc(d.note) + '</div>' +
+      (d.raw_response ? '<div class="raw">' + esc(d.raw_response.slice(0, 400)) + '</div>' : '') +
+      '</div>'
+    ).join('') || '<div class="empty">暂无 AI 建议记录</div>';
   }
 
   // ---------- 初始化 ----------
   async function init() {
     try { await loadAccounts(); } catch (e) {}
-    try { await renderOverview(); } catch (e) { console.error(e); }
+    await Promise.all([
+      renderOverview(), renderPositions(), renderTrades(), renderDecisions(),
+    ].map(f => f().catch(e => console.error(e))));
     initMarket();
-    try { await renderPositions(); } catch (e) {}
   }
   document.addEventListener('DOMContentLoaded', init);
 })();

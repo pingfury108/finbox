@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use anyhow::Result;
-use finbox_store::{SharedDb, SnapshotRow, TickerRow, TradingDayRow};
+use finbox_store::{DailyBarRow, SharedDb, SnapshotRow, TickerRow, TradingDayRow};
 use hithink_sdk::{Client, DumpKind, TradingDaysData};
 
 /// 增量 dump 覆盖窗口（交易日）。落后超过此交易日数时必须全量重拉。
@@ -111,6 +111,44 @@ impl Collector {
         }
     }
 
+    /// 采集几大 A 股指数日 K（复用 daily_bars 表，thscode 天然区分个股/指数）。
+    /// 返回写入行数。
+    pub async fn sync_index_bars(&self, days: u32) -> Result<u64> {
+        // 几大指数：上证/深成/创业板/沪深300/中证500
+        const INDEXES: &[(&str, &str)] = &[
+            ("000001.SH", "上证指数"),
+            ("399001.SZ", "深证成指"),
+            ("399006.SZ", "创业板指"),
+            ("000300.SH", "沪深300"),
+            ("000905.SH", "中证500"),
+        ];
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let start_ms = now_ms - (days as i64) * 86_400_000;
+        let mut total = 0u64;
+        for (code, name) in INDEXES {
+            let data = self.client.index_price_historical(code, start_ms, now_ms).await?;
+            let rows: Vec<DailyBarRow> = data
+                .item
+                .into_iter()
+                .map(|b| DailyBarRow {
+                    thscode: code.to_string(),
+                    date_ms: b.date_ms,
+                    date: fmt_date(b.date_ms),
+                    open: b.open_price,
+                    high: b.high_price,
+                    low: b.low_price,
+                    close: b.close_price,
+                    volume: b.volume,
+                    turnover: b.turnover,
+                })
+                .collect();
+            let n = self.db.lock().unwrap().insert_daily_bars(&rows)?;
+            println!("[指数] {name}({code}) 写入 {n} 根日K");
+            total += n;
+        }
+        Ok(total)
+    }
+
     /// 采集一次全市场行情快照（分页），返回标的数量。
     pub async fn collect_market_snapshot(&self) -> Result<usize> {
         let mut ts_ms: Option<i64> = None;
@@ -160,6 +198,12 @@ impl Collector {
 fn missed_trading_days(last_bar_date: &str, calendar: &TradingDaysData) -> usize {
     let last = last_bar_date.replace('-', "");
     calendar.item.iter().filter(|d| d.date.as_str() > last.as_str()).count()
+}
+
+fn fmt_date(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|t| t.format("%Y-%m-%d").to_string())
+        .unwrap_or_default()
 }
 
 fn now_ms() -> i64 {

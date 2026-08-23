@@ -12,6 +12,7 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 dotenvy = { workspace = true }
+chrono = { workspace = true }
 
 [[bin]]
 name = "finbox-collector"
