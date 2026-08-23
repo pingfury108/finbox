@@ -71,7 +71,9 @@ fn layout(title: &str, active: &str, body: &str) -> Html<String> {
 </head><body>
 <header class="topbar">
   <div class="brand">finbox <span class="brand-sub">AI 模拟交易</span></div>
-  <nav class="mainnav">{navo}{navm}{navp}{navt}{navd}{navs}</nav>
+  <nav class="mainnav">{navo}{navm}{navp}{navt}{navd}{navs}
+    <a class="btn-new" href="/accounts/new">+ 新建账户</a>
+  </nav>
   <div class="acct-switch">
     <select id="acct-select"><option>选择账户…</option></select>
   </div>

@@ -343,9 +343,13 @@
   // ---------- 初始化 ----------
   async function init() {
     try { await loadAccounts(); } catch (e) {}
+    // 各页面渲染（并行，各自容错）
     await Promise.all([
-      renderOverview(), renderPositions(), renderTrades(), renderDecisions(),
-    ].map(f => f().catch(e => console.error(e))));
+      renderOverview(),
+      renderPositions(),
+      renderTrades(),
+      renderDecisions(),
+    ].map(p => p.catch(e => console.error(e))));
     initMarket();
   }
   document.addEventListener('DOMContentLoaded', init);
