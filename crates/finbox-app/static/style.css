@@ -38,10 +38,13 @@ a:hover { text-decoration: underline; }
 .mainnav a:hover { background: var(--panel2); color: var(--text); text-decoration: none; }
 .mainnav a.active { background: var(--panel2); color: var(--text); font-weight: 600; }
 .mainnav .btn-new {
-  background: var(--accent); color: #fff; border-radius: 6px;
+  background: transparent; color: var(--accent); border-radius: 6px;
   padding: 6px 14px; margin-left: 4px; font-weight: 600;
+  border: 1px solid var(--accent);
 }
-.mainnav .btn-new:hover { background: #3d8bff; text-decoration: none; }
+.mainnav .btn-new:hover {
+  background: rgba(88,166,255,0.12); text-decoration: none;
+}
 .acct-switch select {
   background: var(--panel2); color: var(--text); border: 1px solid var(--border);
   padding: 6px 10px; border-radius: 6px; min-width: 140px;
