@@ -33,9 +33,19 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 /// 写操作经 `Mutex` 串行化。
 pub type SharedDb = Arc<Mutex<Db>>;
 
-/// 打开共享句柄。
+/// 打开共享句柄（旧格式，建全部表）。
 pub fn open_shared(path: impl AsRef<Path>) -> Result<SharedDb> {
     Ok(Arc::new(Mutex::new(Db::open(path)?)))
+}
+
+/// 打开共享行情库句柄。
+pub fn open_market_shared(path: impl AsRef<Path>) -> Result<SharedDb> {
+    Ok(Arc::new(Mutex::new(Db::open_market(path)?)))
+}
+
+/// 打开共享账户库句柄。
+pub fn open_account_shared(path: impl AsRef<Path>) -> Result<SharedDb> {
+    Ok(Arc::new(Mutex::new(Db::open_account(path)?)))
 }
 
 #[derive(Debug, Error)]
@@ -106,7 +116,8 @@ pub struct Stats {
     pub last_snapshot_ts: Option<i64>,
 }
 
-const SCHEMA: &str = r#"
+/// 行情库表结构（共享，只读为主）。
+const MARKET_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
     key   VARCHAR PRIMARY KEY,
     value VARCHAR
@@ -158,6 +169,15 @@ CREATE TABLE IF NOT EXISTS snapshots (
     turnover               DOUBLE,
     PRIMARY KEY (ts_ms, thscode)
 );
+CREATE INDEX IF NOT EXISTS ix_snapshots_thscode_ts ON snapshots (thscode, ts_ms);
+"#;
+
+/// 账户库表结构（每账户独立，读写）。
+const ACCOUNT_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS meta (
+    key   VARCHAR PRIMARY KEY,
+    value VARCHAR
+);
 CREATE TABLE IF NOT EXISTS account (
     id               INTEGER PRIMARY KEY,
     cash             DOUBLE NOT NULL,
@@ -169,9 +189,9 @@ CREATE TABLE IF NOT EXISTS positions (
     quantity   INTEGER NOT NULL,
     avg_cost   DOUBLE NOT NULL
 );
-CREATE SEQUENCE IF NOT EXISTS trades_id_seq;
+CREATE SEQUENCE IF NOT EXISTS acct_id_seq;
 CREATE TABLE IF NOT EXISTS trades (
-    id          INTEGER PRIMARY KEY DEFAULT nextval('trades_id_seq'),
+    id          INTEGER PRIMARY KEY DEFAULT nextval('acct_id_seq'),
     thscode     VARCHAR NOT NULL,
     name        VARCHAR NOT NULL,
     side        VARCHAR(4) NOT NULL,
@@ -183,9 +203,8 @@ CREATE TABLE IF NOT EXISTS trades (
     ts_ms       BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_trades_thscode_ts ON trades (thscode, ts_ms);
-CREATE INDEX IF NOT EXISTS ix_snapshots_thscode_ts ON snapshots (thscode, ts_ms);
 CREATE TABLE IF NOT EXISTS decision_logs (
-    id           INTEGER PRIMARY KEY DEFAULT nextval('trades_id_seq'),
+    id           INTEGER PRIMARY KEY DEFAULT nextval('acct_id_seq'),
     ts_ms        BIGINT NOT NULL,
     model        VARCHAR NOT NULL,
     context      VARCHAR,
@@ -195,14 +214,14 @@ CREATE TABLE IF NOT EXISTS decision_logs (
     note         VARCHAR
 );
 CREATE TABLE IF NOT EXISTS account_snapshots (
-    id           INTEGER PRIMARY KEY DEFAULT nextval('trades_id_seq'),
+    id           INTEGER PRIMARY KEY DEFAULT nextval('acct_id_seq'),
     ts_ms        BIGINT NOT NULL,
     cash         DOUBLE NOT NULL,
     market_value DOUBLE NOT NULL,
     total_asset  DOUBLE NOT NULL
 );
 CREATE TABLE IF NOT EXISTS reviews (
-    id          INTEGER PRIMARY KEY DEFAULT nextval('trades_id_seq'),
+    id          INTEGER PRIMARY KEY DEFAULT nextval('acct_id_seq'),
     decision_id INTEGER NOT NULL,
     days_after  INTEGER NOT NULL,
     ts_ms       BIGINT NOT NULL,
@@ -217,6 +236,17 @@ pub struct Db {
 }
 
 impl Db {
+    /// 打开行情库（共享只读：tickers/日K/快照/交易日历/全局配置）。
+    pub fn open_market(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_schema(path, MARKET_SCHEMA)
+    }
+
+    /// 打开账户库（每账户独立：账户/持仓/流水/决策/快照/复盘/账户配置）。
+    pub fn open_account(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_schema(path, ACCOUNT_SCHEMA)
+    }
+
+    /// 兼容旧入口：建全部表（单库旧格式）。
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -234,7 +264,29 @@ impl Db {
         };
         // 本地加载 parquet 扩展（扩展文件需预置于 ~/.duckdb/extensions/<ver>/<platform>/）
         let _ = conn.execute_batch("LOAD parquet;");
-        conn.execute_batch(SCHEMA)?;
+        let _ = conn.execute_batch(MARKET_SCHEMA);
+        let _ = conn.execute_batch(ACCOUNT_SCHEMA);
+        Ok(Self { conn })
+    }
+
+    fn open_with_schema(path: impl AsRef<Path>, schema: &str) -> Result<Self> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        // 关闭扩展自动加载/安装：DuckDB 首次使用会尝试连 extensions.duckdb.org 拉扩展，
+        // 在国内网络/代理环境下会长时间卡死（实测挂起于 Cloudflare :80）
+        let config = Config::default().enable_autoload_extension(false)?;
+        let conn = if path.as_os_str() == ":memory:" {
+            Connection::open_in_memory_with_flags(config)?
+        } else {
+            Connection::open_with_flags(path, config)?
+        };
+        // 本地加载 parquet 扩展（扩展文件需预置于 ~/.duckdb/extensions/<ver>/<platform>/）
+        let _ = conn.execute_batch("LOAD parquet;");
+        conn.execute_batch(schema)?;
         Ok(Self { conn })
     }
 

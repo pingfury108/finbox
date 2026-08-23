@@ -9,6 +9,11 @@ pub mod sim;
 pub use risk::{RiskConfig, RiskManager, RiskReport};
 pub use sim::SimBroker;
 
+/// 单票仓位上限（占总资产比例）。
+const MAX_POSITION_PCT: f64 = 0.20;
+/// 持仓数量上限。
+const MAX_POSITIONS: usize = 3;
+
 use finbox_core::{Account, Execution, OrderIntent, Position, RejectReason};
 use finbox_store::StoreError;
 

@@ -52,28 +52,31 @@ pub enum DecisionError {
 
 /// 决策引擎。
 pub struct DecisionEngine {
-    db: SharedDb,
-    config: LlmConfig,
+    market: SharedDb,
+    acct: SharedDb,
+    config: std::sync::Mutex<LlmConfig>,
     /// 自选池（可为空）
     watchlist: Vec<String>,
 }
 
 impl DecisionEngine {
-    pub fn new(db: SharedDb, config: LlmConfig, watchlist: Vec<String>) -> Self {
-        Self { db, config, watchlist }
+    pub fn new(market: SharedDb, acct: SharedDb, config: LlmConfig, watchlist: Vec<String>) -> Self {
+        Self { market, acct, config: std::sync::Mutex::new(config), watchlist }
     }
 
     /// 执行一轮决策：初筛 → 上下文 → LLM → 意图。
     /// `candidate_count` 为初筛输出候选数（少而精，建议 3-5）。
     pub async fn decide(&self, candidate_count: usize) -> Result<DecisionResult, DecisionError> {
-        let (_, ctx) = {
-            let db = self.db.lock().unwrap();
-            let candidates = screen::screen(&db, candidate_count)?;
-            let ctx = context::build_context(&db, &self.watchlist, &candidates)?;
-            (candidates, ctx)
+        let candidates = {
+            let m = self.market.lock().unwrap();
+            screen::screen(&m, candidate_count)?
+        };
+        let ctx = {
+            let (m, a) = (self.market.clone(), self.acct.clone());
+            context::build_context(&m, &a, &self.watchlist, &candidates)?
         };
 
-        if self.config.api_key.is_empty() {
+        if self.config.lock().unwrap().api_key.is_empty() {
             let log = self.log_decision("", "", "[]", "rejected", "未配置 LLM_API_KEY，跳过");
             return Ok(DecisionResult {
                 intents: vec![],
@@ -84,7 +87,9 @@ impl DecisionEngine {
             });
         }
 
-        let raw = match llm::chat(&self.config, &ctx).await {
+        // 复制配置再释放锁，避免跨 await 持锁
+        let llm_cfg = self.config.lock().unwrap().clone();
+        let raw = match llm::chat(&llm_cfg, &ctx).await {
             Ok(r) => r,
             Err(e) => {
                 let note = format!("LLM 调用失败: {e}");
@@ -129,15 +134,33 @@ impl DecisionEngine {
         })
     }
 
+    /// 从行情库 meta 热加载 LLM 配置（页面改 key 即时生效）。
+    /// 返回是否变化。
+    pub fn reload_llm(&self, market: &SharedDb, defaults: &LlmConfig) -> bool {
+        let m = market.lock().unwrap();
+        let get = |k: &str| m.meta_get(k).ok().flatten();
+        let base = get("llm_base_url").unwrap_or_else(|| defaults.base_url.clone());
+        let key = get("llm_api_key").unwrap_or_else(|| defaults.api_key.clone());
+        let model = get("llm_model").unwrap_or_else(|| defaults.model.clone());
+        let mut cfg = self.config.lock().unwrap();
+        if base != cfg.base_url || key != cfg.api_key || model != cfg.model {
+            cfg.base_url = base;
+            cfg.api_key = key;
+            cfg.model = model;
+            return true;
+        }
+        false
+    }
+
     fn log_decision(&self, ctx: &str, raw: &str, actions: &str, status: &str, note: &str) -> i64 {
         let ts = chrono::Utc::now().timestamp_millis();
-        self.db
+        self.acct
             .lock()
             .unwrap()
             .insert_decision_log(&DecisionLog {
                 id: 0,
                 ts_ms: ts,
-                model: self.config.model.clone(),
+                model: self.config.lock().unwrap().model.clone(),
                 context: ctx.to_string(),
                 raw_response: raw.to_string(),
                 actions: actions.to_string(),

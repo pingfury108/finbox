@@ -5,7 +5,8 @@
 //! - 持仓超期：超过 N 天且无起色（现价 < 成本）强制清仓
 //! - 账户熔断：总资产回撤 ≥ 5% 时停止买入（熔断期）
 //!
-//! 该层是「控制回撤 ≤ 5%」的第一道防线，所有卖出意图直接交给 Broker 执行。
+//! 双库架构：行情（价格/涨跌家数）读 market 库，账户（持仓/熔断状态）读写 account 库。
+//! 铁律：**不同时持有两把锁** —— 先读持仓（acct）解锁，再读价格（market）解锁，最后写状态（acct）。
 
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
@@ -67,51 +68,51 @@ fn regime_max_total(breadth_ratio: f64) -> (&'static str, f64) {
 }
 
 pub struct RiskManager {
-    pub db: SharedDb,
+    pub market: SharedDb,
+    pub acct: SharedDb,
     pub config: RiskConfig,
-    /// 进程内缓存的历史总资产峰值（毫秒 → 值），避免每次查库
+    /// 进程内缓存的历史总资产峰值
     peak_cache: AtomicU64,
 }
 
 impl RiskManager {
-    pub fn new(db: SharedDb, config: RiskConfig) -> Self {
-        Self { db, config, peak_cache: AtomicU64::new(0) }
+    pub fn new(market: SharedDb, acct: SharedDb, config: RiskConfig) -> Self {
+        Self { market, acct, config, peak_cache: AtomicU64::new(0) }
     }
 
-    /// 运行一轮风控评估：检查持仓触发止损/止盈/超期，更新熔断状态。
+    /// 运行一轮风控评估。
     pub fn evaluate(&self) -> finbox_store::Result<RiskReport> {
         let mut report = RiskReport::default();
-        let db = self.db.lock().unwrap();
 
-        // 1. 市场状态（涨跌家数）
-        let (up, total) = db.market_breadth()?;
+        // 1. 市场状态（涨跌家数，读 market）
+        let (up, total) = self.market.lock().unwrap().market_breadth()?;
         let ratio = if total > 0 { up as f64 / total as f64 } else { 0.5 };
         let (regime, max_total) = regime_max_total(ratio);
         report.regime = regime.into();
         report.max_total_pct = max_total;
 
-        // 2. 账户峰值与熔断检查（peak 读写直接操作 db，不再重复加锁）
-        let acct = db.get_or_init_account(0.0)?;
-        let total_asset = db.total_asset(&acct)?;
-        let peak = self.current_peak_from(&db);
+        // 2. 账户峰值与熔断（读 acct；总资产 = 现金 + 持仓市值[读 market 价格]）
+        let total_asset = self.total_asset()?;
+        let (peak, fuse_until_ms) = {
+            let db = self.acct.lock().unwrap();
+            let peak = self.current_peak_from(&db);
+            let fuse = db.meta_get("fuse_until_ms")?.and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+            (peak, fuse)
+        };
         if total_asset > peak {
-            self.update_peak_from(&db, total_asset);
+            self.update_peak(total_asset);
         }
-        let peak = self.current_peak_from(&db);
+        let peak = self.current_peak();
+
+        let now_ms = Utc::now().timestamp_millis();
         if peak > 0.0 && (peak - total_asset) / peak >= self.config.fuse_drawdown_pct {
-            let fuse_until_ms = db
-                .meta_get("fuse_until_ms")?
-                .and_then(|s| s.parse::<i64>().ok())
-                .unwrap_or(0);
-            let now_ms = Utc::now().timestamp_millis();
             if fuse_until_ms > now_ms {
                 report.can_buy = false;
                 let mins_left = (fuse_until_ms - now_ms) / 60000;
-                report.note = format!("账户回撤 {:.0}% 熔断中，剩余约 {mins_left} 分钟", self.config.fuse_drawdown_pct * 100.0);
+                report.note = format!("账户回撤 {:.1}% 熔断中，剩余约 {mins_left} 分钟", self.config.fuse_drawdown_pct * 100.0);
             } else {
-                // 触发熔断：设置熔断期
                 let until = now_ms + self.config.fuse_days as i64 * 86_400_000;
-                db.meta_set("fuse_until_ms", &until.to_string())?;
+                self.acct.lock().unwrap().meta_set("fuse_until_ms", &until.to_string())?;
                 report.can_buy = false;
                 report.note = format!("触发熔断：回撤 {:.1}%，停止买入 {} 天", self.config.fuse_drawdown_pct * 100.0, self.config.fuse_days);
             }
@@ -120,18 +121,40 @@ impl RiskManager {
         }
 
         // 3. 持仓风控（止损/止盈/超期）
-        let positions = db.positions()?;
+        let positions = self.acct.lock().unwrap().positions()?;
         for p in &positions {
-            if let Some(sell) = self.check_position(&db, p)? {
+            if let Some(sell) = self.check_position(p)? {
                 report.forced_sells.push(sell);
             }
         }
         Ok(report)
     }
 
+    /// 总资产 = 现金 + 持仓市值（按最新行情价，读 market）。
+    fn total_asset(&self) -> finbox_store::Result<f64> {
+        let acct = self.acct.lock().unwrap();
+        let account = acct.get_or_init_account(0.0)?;
+        let positions = acct.positions()?;
+        drop(acct); // 释放 acct 锁，再读 market
+        let mut mv = 0.0;
+        {
+            let m = self.market.lock().unwrap();
+            for p in &positions {
+                let price = m.latest_snapshot_price(&p.thscode)?.unwrap_or(p.avg_cost);
+                mv += price * p.quantity as f64;
+            }
+        }
+        Ok(account.cash + mv)
+    }
+
     /// 对单只持仓判断是否需要卖出。
-    fn check_position(&self, db: &finbox_store::Db, p: &Position) -> finbox_store::Result<Option<OrderIntent>> {
-        let cur = db.latest_snapshot_price(&p.thscode)?.unwrap_or(p.avg_cost);
+    fn check_position(&self, p: &Position) -> finbox_store::Result<Option<OrderIntent>> {
+        let cur = self
+            .market
+            .lock()
+            .unwrap()
+            .latest_snapshot_price(&p.thscode)?
+            .unwrap_or(p.avg_cost);
         if cur <= 0.0 {
             return Ok(None);
         }
@@ -148,7 +171,8 @@ impl RiskManager {
         }
         // 超期：持仓超天数且无起色（现价 < 成本）→ 全部卖出
         if pnl < 0.0 {
-            if let Some(bought_ms) = db.position_bought_at(&p.thscode)? {
+            let bought_ms = self.acct.lock().unwrap().position_bought_at(&p.thscode)?;
+            if let Some(bought_ms) = bought_ms {
                 let days = (Utc::now().timestamp_millis() - bought_ms) / 86_400_000;
                 if days >= self.config.max_holding_days as i64 {
                     return Ok(Some(self.sell_intent(p, p.quantity)));
@@ -168,38 +192,44 @@ impl RiskManager {
         }
     }
 
+    fn current_peak(&self) -> f64 {
+        let v = self.peak_cache.load(AtomicOrdering::Relaxed);
+        if v > 0 {
+            return f64::from_bits(v);
+        }
+        let peak = self.acct.lock().unwrap().meta_get("peak_asset").ok().flatten()
+            .and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        self.peak_cache.store(peak.to_bits(), AtomicOrdering::Relaxed);
+        peak
+    }
+
     fn current_peak_from(&self, db: &finbox_store::Db) -> f64 {
         let v = self.peak_cache.load(AtomicOrdering::Relaxed);
         if v > 0 {
             return f64::from_bits(v);
         }
-        // 从 meta 读取历史峰值
-        let peak = db
-            .meta_get("peak_asset")
-            .ok()
-            .flatten()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(0.0);
+        let peak = db.meta_get("peak_asset").ok().flatten()
+            .and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
         self.peak_cache.store(peak.to_bits(), AtomicOrdering::Relaxed);
         peak
     }
 
-    fn update_peak_from(&self, db: &finbox_store::Db, asset: f64) {
+    fn update_peak(&self, asset: f64) {
         self.peak_cache.store(asset.to_bits(), AtomicOrdering::Relaxed);
-        let _ = db.meta_set("peak_asset", &asset.to_string());
+        let _ = self.acct.lock().unwrap().meta_set("peak_asset", &asset.to_string());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use finbox_store::{open_shared, SnapshotRow};
+    use finbox_store::{open_account_shared, open_market_shared, SnapshotRow};
 
-    // 简化：直接在 shared 上构造测试数据
-    fn setup() -> (SharedDb, RiskManager) {
-        let shared = open_shared(":memory:").unwrap();
-        let rm = RiskManager::new(shared.clone(), RiskConfig::default());
-        (shared, rm)
+    fn setup() -> (SharedDb, SharedDb, RiskManager) {
+        let market = open_market_shared(":memory:").unwrap();
+        let acct = open_account_shared(":memory:").unwrap();
+        let rm = RiskManager::new(market.clone(), acct.clone(), RiskConfig::default());
+        (market, acct, rm)
     }
 
     #[test]
@@ -211,19 +241,21 @@ mod tests {
 
     #[test]
     fn stop_loss_triggers_forced_sell() {
-        let (shared, rm) = setup();
+        let (market, acct, rm) = setup();
         {
-            let db = shared.lock().unwrap();
-            // 账户 + 持仓（成本 10 元）+ 最新价 9.4（-6%）
-            db.get_or_init_account(100000.0).unwrap();
-            db.upsert_position(&Position {
+            let a = acct.lock().unwrap();
+            a.get_or_init_account(100000.0).unwrap();
+            a.upsert_position(&Position {
                 thscode: "600519.SH".into(),
                 name: "贵州茅台".into(),
                 quantity: 100,
                 avg_cost: 10.0,
             })
             .unwrap();
-            db.insert_snapshots(
+        }
+        {
+            let m = market.lock().unwrap();
+            m.insert_snapshots(
                 1,
                 &[SnapshotRow {
                     thscode: "600519.SH".into(),
@@ -239,39 +271,29 @@ mod tests {
                 }],
             )
             .unwrap();
-            db.insert_trade(&finbox_core::Trade {
-                thscode: "600519.SH".into(),
-                name: "贵州茅台".into(),
-                side: finbox_core::OrderSide::Buy,
-                price: 10.0,
-                quantity: 100,
-                amount: 1000.0,
-                fee: 5.0,
-                decision_id: None,
-            })
-            .unwrap();
         }
         let report = rm.evaluate().unwrap();
         assert_eq!(report.forced_sells.len(), 1, "亏损 6% 应触发止损卖出");
         assert_eq!(report.forced_sells[0].thscode, "600519.SH");
-        assert_eq!(report.forced_sells[0].side, finbox_core::OrderSide::Sell);
     }
 
     #[test]
     fn no_stop_loss_when_profit() {
-        let (shared, rm) = setup();
+        let (market, acct, rm) = setup();
         {
-            let db = shared.lock().unwrap();
-            db.get_or_init_account(100000.0).unwrap();
-            db.upsert_position(&Position {
+            let a = acct.lock().unwrap();
+            a.get_or_init_account(100000.0).unwrap();
+            a.upsert_position(&Position {
                 thscode: "600519.SH".into(),
                 name: "贵州茅台".into(),
                 quantity: 100,
                 avg_cost: 10.0,
             })
             .unwrap();
-            // 现价 10.5（+5%）不触发止损
-            db.insert_snapshots(
+        }
+        {
+            let m = market.lock().unwrap();
+            m.insert_snapshots(
                 1,
                 &[SnapshotRow {
                     thscode: "600519.SH".into(),

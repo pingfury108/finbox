@@ -123,14 +123,11 @@ impl Db {
         Ok(qty as u32)
     }
 
-    /// 总资产 = 现金 + 持仓市值（按最新快照价，无快照用成本价）。
-    pub fn total_asset(&self, account: &Account) -> Result<f64> {
+    /// 总资产估算 = 现金 + 持仓市值（按成本价兜底，**不查行情表**，可在账户库独立调用）。
+    /// 精确市值（按最新行情）需跨库，由上层（broker/risk）自行计算。
+    pub fn total_asset_estimate(&self, account: &Account) -> Result<f64> {
         let positions = self.positions()?;
-        let mut mv = 0.0;
-        for p in &positions {
-            let price = self.latest_snapshot_price(&p.thscode)?.unwrap_or(p.avg_cost);
-            mv += price * p.quantity as f64;
-        }
+        let mv: f64 = positions.iter().map(|p| p.avg_cost * p.quantity as f64).sum();
         Ok(account.cash + mv)
     }
 

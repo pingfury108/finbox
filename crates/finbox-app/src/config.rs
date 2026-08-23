@@ -5,8 +5,8 @@ use anyhow::Result;
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Config {
-    /// DuckDB 路径
-    pub db_path: String,
+    /// 数据根目录（market.duckdb 与 accounts/ 都在其下）
+    pub data_dir: String,
     /// 初始资金
     pub initial_capital: f64,
     /// 自选池（逗号分隔 thscode）
@@ -28,7 +28,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            db_path: "data/finbox.duckdb".into(),
+            data_dir: "data".into(),
             initial_capital: 200_000.0,
             watchlist: vec![],
             candidate_count: 5,
@@ -46,7 +46,7 @@ impl Config {
     /// 从环境变量加载（配合 .env）。
     pub fn from_env() -> Result<Self> {
         Ok(Self {
-            db_path: env_str("FINBOX_DB", &Self::default().db_path),
+            data_dir: env_str("FINBOX_DATA", &Self::default().data_dir),
             initial_capital: env_float("INITIAL_CAPITAL", Self::default().initial_capital),
             watchlist: env_str("WATCHLIST", "")
                 .split(',')
