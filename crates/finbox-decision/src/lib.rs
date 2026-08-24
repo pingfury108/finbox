@@ -58,20 +58,19 @@ pub struct DecisionEngine {
     config: std::sync::Mutex<LlmConfig>,
     /// 自选池（可为空）
     watchlist: Vec<String>,
+    /// 初筛结果缓存（避免每轮决策都全表扫描 19s）
+    screen_cache: std::sync::Mutex<Option<(std::time::Instant, Vec<crate::screen::Candidate>)>>,
 }
 
 impl DecisionEngine {
     pub fn new(market: SharedDb, acct: SharedDb, config: LlmConfig, watchlist: Vec<String>) -> Self {
-        Self { market, acct, config: std::sync::Mutex::new(config), watchlist }
+        Self { market, acct, config: std::sync::Mutex::new(config), watchlist, screen_cache: std::sync::Mutex::new(None) }
     }
 
     /// 执行一轮决策：初筛 → 上下文 → LLM → 意图。
     /// `candidate_count` 为初筛输出候选数（少而精，建议 3-5）。
     pub async fn decide(&self, candidate_count: usize) -> Result<DecisionResult, DecisionError> {
-        let candidates = {
-            let m = self.market.lock().unwrap();
-            screen::screen(&m, candidate_count)?
-        };
+        let candidates = self.cached_screen(candidate_count).await?;
         info!("初筛完成：{} 只候选", candidates.len());
         for c in &candidates {
             info!("  候选 {} {} 现价{:.2} 涨幅{:.2}% 评分{:.2}", c.thscode, c.name, c.price, c.pct, c.score);
@@ -167,6 +166,30 @@ impl DecisionEngine {
     /// 记录一次未调 LLM 的轮次（风控拦截/无 LLM key），用于决策留痕完整性。
     pub fn log_skip(&self, status: &str, note: &str) -> i64 {
         self.log_decision("", "", "[]", status, note)
+    }
+
+    /// 初筛：缓存 5 分钟；未命中时用 spawn_blocking 执行（锁+全表扫描移到阻塞线程池，
+    /// 避免长时间持 std Mutex 阻塞 tokio worker，导致 Web 请求全部卡死）。
+    async fn cached_screen(&self, candidate_count: usize) -> Result<Vec<crate::screen::Candidate>, DecisionError> {
+        const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+        {
+            let cache = self.screen_cache.lock().unwrap();
+            if let Some((at, cands)) = &*cache {
+                if at.elapsed() < CACHE_TTL && cands.len() >= candidate_count {
+                    return Ok(cands.clone());
+                }
+            }
+        }
+        let market = self.market.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let m = market.lock().unwrap();
+            screen::screen(&m, candidate_count)
+        })
+        .await
+        .map_err(|e| DecisionError::Llm(format!("初筛任务失败: {e}")))?;
+        let cands = result?;
+        *self.screen_cache.lock().unwrap() = Some((std::time::Instant::now(), cands.clone()));
+        Ok(cands)
     }
 
     fn log_decision(&self, ctx: &str, raw: &str, actions: &str, status: &str, note: &str) -> i64 {        let ts = chrono::Utc::now().timestamp_millis();
