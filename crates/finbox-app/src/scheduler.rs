@@ -106,21 +106,25 @@ impl Scheduler {
             let today = now.format("%Y%m%d").to_string();
             let weekday_iso = now.weekday().num_days_from_monday() + 1;
             let minute = now.hour() * 60 + now.minute();
-            let trading_day = self.market.lock().unwrap().is_trading_day(&today)?;
 
-            if trading_day && weekday_iso < 6 {
-                // 盘前同步
+            // 工作日才可能交易；周末直接跳过
+            if weekday_iso < 6 {
+                // 盘前同步：工作日 9:00-9:15 先刷新交易日历（即使旧日历不含今天，
+                // 也先拉新日历，避免“日历旧→判定非交易日→不刷新”的死循环）
                 if minute >= 9 * 60 && minute < 9 * 60 + 15 && !self.pre_open_done {
                     self.refresh_collector_key()?;
                     let days = self.collector.client.trading_days().await?;
                     self.collector.upsert_trading_days(&days).await?;
                     self.collector.sync_daily_bars(std::path::Path::new("data/dumps"), &days).await?;
                     self.collector.import_adjustment_factors(std::path::Path::new("data/dumps")).await?;
-                    log::info!("[采集][盘前] 同步完成");
+                    log::info!("[采集][盘前] 同步完成（{} 个交易日）", days.item.len());
                     self.pre_open_done = true;
                 }
-                // 盘中采集
-                if minute >= 9 * 60 + 30 && minute < 15 * 60 {
+
+                // 用最新日历判断今天是否交易日
+                let trading_day = self.market.lock().unwrap().is_trading_day(&today)?;
+                if trading_day && minute >= 9 * 60 + 30 && minute < 15 * 60 {
+                    // 盘中采集
                     let min = now.timestamp() / 60;
                     if min - self.last_collect >= self.cfg.collect_interval_seconds as i64 / 60 {
                         self.refresh_collector_key()?;
@@ -129,6 +133,7 @@ impl Scheduler {
                         self.last_collect = min;
                     }
                 }
+
                 if minute < 9 * 60 {
                     self.pre_open_done = false;
                 }
@@ -220,20 +225,14 @@ fn read_acct_conf(cfg: &Config, acct: &SharedDb) -> AcctConf {
 
 impl AccountCtx {
     /// 账户任务主循环：盘中风控 + 收盘决策。
+    /// 交易日历由采集任务盘前刷新；这里按“工作日 + 时段”运行，避免旧日历误判。
     async fn run_account(&mut self) -> anyhow::Result<()> {
         loop {
             let now = Local::now();
-            let today = now.format("%Y%m%d").to_string();
             let weekday_iso = now.weekday().num_days_from_monday() + 1;
             let minute = now.hour() * 60 + now.minute();
-            let trading_day = self
-                .market
-                .lock()
-                .unwrap()
-                .is_trading_day(&today)
-                .unwrap_or(false);
 
-            if trading_day && weekday_iso < 6 {
+            if weekday_iso < 6 {
                 // 盘中：风控监控（止损/止盈/超期）
                 if minute >= 9 * 60 + 30 && minute < 15 * 60 {
                     self.intraday_risk().await?;
