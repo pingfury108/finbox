@@ -90,6 +90,19 @@ a:hover { text-decoration: underline; }
 .chart { width: 100%; height: 260px; }
 .chart-lg { height: 520px; }
 
+/* 账户管理条 */
+.acct-mgmt { margin-bottom: 14px; display: flex; flex-wrap: wrap; gap: 8px; }
+.acct-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--panel2); border: 1px solid var(--border);
+  border-radius: 20px; padding: 5px 12px; font-size: 13px;
+}
+.acct-chip .del-btn {
+  background: none; border: none; color: var(--muted); cursor: pointer;
+  font-size: 12px; padding: 0 2px; border-radius: 4px;
+}
+.acct-chip .del-btn:hover { color: var(--up); }
+
 /* 指数切换条 */
 .index-tabs { display: flex; gap: 8px; flex-wrap: wrap; }
 .index-tab {

@@ -62,6 +62,7 @@ pub fn router(state: WebState) -> Router {
         .route("/api/account/{name}/positions", get(api::positions))
         .route("/api/account/{name}/trades", get(api::trades))
         .route("/api/account/{name}/decisions", get(api::decisions))
+        .route("/api/account/{name}", axum::routing::delete(api::delete_account))
         // 静态资源（echarts 等）
         .nest_service("/static", ServeDir::new("crates/finbox-app/static"))
         .with_state(state)
@@ -105,7 +106,7 @@ fn layout(title: &str, active: &str, body: &str) -> Html<String> {
 
 // ---- 概览 ----
 async fn overview(State(_st): State<WebState>) -> impl IntoResponse {
-    let body = r#"
+    let body = r#"<div class="acct-mgmt" id="acct-mgmt"></div>
 <div class="cards" id="ov-cards"></div>
 <div class="grid-2">
   <section class="panel">

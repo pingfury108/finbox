@@ -54,6 +54,26 @@
     if (!document.getElementById('ov-cards')) return;
     const accts = await get('/api/accounts');
     const acct = accts.find(a => a.name === activeAcct) || accts[0];
+
+    // 账户管理条（列表 + 删除）
+    const mgmt = document.getElementById('acct-mgmt');
+    if (mgmt) {
+      mgmt.innerHTML = accts.map(a =>
+        '<span class="acct-chip">' + esc(a.name) + '（¥' + fmt(a.total, 0) + '）' +
+        '<button class="del-btn" data-name="' + esc(a.name) + '" title="删除此账户">✕</button></span>'
+      ).join('') || '<span class="empty" style="display:inline">暂无账户</span>';
+      mgmt.querySelectorAll('.del-btn').forEach(b => {
+        b.addEventListener('click', async () => {
+          const name = b.dataset.name;
+          if (!confirm('确定删除账户「' + name + '」？其全部资金/持仓/记录将永久删除！')) return;
+          try {
+            await fetch('/api/account/' + encodeURIComponent(name), { method: 'DELETE' });
+            location.reload();
+          } catch (e) { alert('删除失败：' + e); }
+        });
+      });
+    }
+
     if (!acct) {
       document.getElementById('ov-cards').innerHTML =
         '<div class="empty"><a href="/accounts/new">点击新建第一个模拟账户</a></div>';

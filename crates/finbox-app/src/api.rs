@@ -134,6 +134,16 @@ pub async fn accounts(State(st): State<WebState>) -> Json<Vec<AccountAsset>> {
     Json(out)
 }
 
+/// 删除账户（含其全部数据）。
+pub async fn delete_account(
+    State(st): State<WebState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    accounts::remove_account(&st.cfg.data_dir, &name)
+        .map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 /// 账户资产曲线。
 pub async fn equity(
     State(st): State<WebState>,
