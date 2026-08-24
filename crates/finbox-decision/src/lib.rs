@@ -164,8 +164,12 @@ impl DecisionEngine {
         false
     }
 
-    fn log_decision(&self, ctx: &str, raw: &str, actions: &str, status: &str, note: &str) -> i64 {
-        let ts = chrono::Utc::now().timestamp_millis();
+    /// 记录一次未调 LLM 的轮次（风控拦截/无 LLM key），用于决策留痕完整性。
+    pub fn log_skip(&self, status: &str, note: &str) -> i64 {
+        self.log_decision("", "", "[]", status, note)
+    }
+
+    fn log_decision(&self, ctx: &str, raw: &str, actions: &str, status: &str, note: &str) -> i64 {        let ts = chrono::Utc::now().timestamp_millis();
         self.acct
             .lock()
             .unwrap()

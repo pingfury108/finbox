@@ -58,7 +58,7 @@ impl Scheduler {
         Ok(Self { cfg, market, collector, last_collect: 0, pre_open_done: false })
     }
 
-    /// 主循环：采集任务 + 每个账户独立任务 + Web 界面，同进程并行。
+    /// 主循环：采集任务 + 账户动态发现 + Web 界面，同进程并行。
     pub async fn run(self) -> anyhow::Result<()> {
         let mut handles = Vec::new();
 
@@ -69,27 +69,17 @@ impl Scheduler {
             crate::web::serve(&cfg_web, &bind).await.map_err(|e| anyhow::anyhow!("Web: {e}"))
         }));
 
-        // 账户任务
-        let accounts = accounts::list_accounts(&self.cfg.data_dir)?;
-        if accounts.is_empty() {
-            log::warn!("没有任何账户，先创建：finbox account create <name>");
-        }
-        for info in accounts {
-            let cfg = self.cfg.clone();
-            let handle = tokio::spawn(async move {
-                let market = accounts::open_market(&cfg.data_dir)?;
-                let acct = accounts::open_account(&cfg.data_dir, &info.name)?;
-                let mut ctx = build_account_ctx(&cfg, &info.name, market, acct);
-                ctx.run_account().await
-            });
-            handles.push(handle);
-        }
+        // 账户监督任务：定期扫描，动态发现新账户/删除账户
+        let cfg_acct = self.cfg.clone();
+        handles.push(tokio::spawn(async move {
+            account_supervisor(cfg_acct).await
+        }));
 
         // 采集任务（本进程内，写 market 库）
         let mut s2 = self;
         let collect_handle = tokio::spawn(async move { s2.run_collector().await });
 
-        // 等待所有任务（账户任务异常退出会让整个进程退出；采集任务常驻）
+        // 等待所有任务
         for h in handles {
             if let Err(e) = h.await {
                 log::error!("任务失败: {e}");
@@ -223,14 +213,67 @@ fn read_acct_conf(cfg: &Config, acct: &SharedDb) -> AcctConf {
     }
 }
 
-impl AccountCtx {
-    /// 账户任务主循环：盘中持续监控。
+/// 账户监督任务：每 60s 扫描账户目录，动态发现新账户（spawn 任务）与删除账户（停止任务）。
+/// 使 Web 新建/删除账户即时生效，无需重启主进程。
+async fn account_supervisor(cfg: Config) -> anyhow::Result<()> {
+    use std::collections::HashMap;
+    use tokio::sync::mpsc;
+
+    let mut running: HashMap<String, mpsc::Sender<()>> = HashMap::new();
+    loop {
+        let accounts = accounts::list_accounts(&cfg.data_dir)?;
+        let names: std::collections::HashSet<String> =
+            accounts.into_iter().map(|a| a.name).collect();
+
+        // 启动新账户任务
+        for name in &names {
+            if running.contains_key(name) {
+                continue;
+            }
+            log::info!("[账户] 动态发现新账户「{name}」，启动任务");
+            let (tx, mut rx) = mpsc::channel::<()>(1);
+            let cfg2 = cfg.clone();
+            let name2 = name.clone();
+            tokio::spawn(async move {
+                let market = accounts::open_market(&cfg2.data_dir);
+                let acct = accounts::open_account(&cfg2.data_dir, &name2);
+                match (market, acct) {
+                    (Ok(market), Ok(acct)) => {
+                        let mut ctx = build_account_ctx(&cfg2, &name2, market, acct);
+                        // 账户循环运行，直到收到停止信号或账户被删除
+                        tokio::select! {
+                            r = ctx.run_account() => log::error!("[{}] 账户任务异常退出: {:?}", name2, r.err()),
+                            _ = rx.recv() => log::info!("[{}] 账户任务已停止", name2),
+                        }
+                    }
+                    _ => log::error!("[{name2}] 打开账户库失败"),
+                }
+            });
+            running.insert(name.clone(), tx);
+        }
+
+        // 停止已删除账户的任务
+        let removed: Vec<String> = running.keys().filter(|n| !names.contains(*n)).cloned().collect();
+        for n in removed {
+            log::info!("[账户] 账户「{n}」已删除，停止任务");
+            if let Some(tx) = running.remove(&n) {
+                let _ = tx.send(()).await;
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    }
+}
+
+impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
     /// - 风控（止损/止盈/超期）：盘中每 60s 实时检查，情况不妙立即卖出
-    /// - AI 决策（买入/主动性卖出）：盘中每 DECISION_INTERVAL 分钟评估一次
+    /// - AI 决策：固定时点（开盘 9:35 / 午间 11:25 / 尾盘 14:55）+ 每 DECISION_INTERVAL 分钟轮询
     /// - 收盘 15:05：复盘 + 账户快照
     async fn run_account(&mut self) -> anyhow::Result<()> {
         log::info!("[{}] 账户任务启动，开始监控", self.name);
         let mut last_decision_min = 0i64;
+        // 固定决策时点（分钟）：开盘/午间/尾盘
+        let fixed_points = [9 * 60 + 35, 11 * 60 + 25, 14 * 60 + 55];
         loop {
             let now = Local::now();
             let weekday_iso = now.weekday().num_days_from_monday() + 1;
@@ -243,9 +286,11 @@ impl AccountCtx {
                     // ① 风控实时监控（每 60s）：止损/止盈/超期 → 立即卖出
                     self.intraday_risk().await?;
 
-                    // ② AI 定期决策（每 DECISION_INTERVAL 分钟）：买入/主动性卖出
+                    // ② AI 决策：固定时点 或 距上次决策超过间隔
                     let interval = self.decision_interval();
-                    if min - last_decision_min >= interval as i64 {
+                    let is_fixed = fixed_points.contains(&minute);
+                    let due = is_fixed || min - last_decision_min >= interval as i64;
+                    if due {
                         self.periodic_decision().await?;
                         last_decision_min = min;
                     }
@@ -288,20 +333,29 @@ impl AccountCtx {
     /// 定期 AI 决策：风控门控 → 初筛+LLM → 买入/卖出意图执行。
     async fn periodic_decision(&self) -> anyhow::Result<()> {
         let report = self.risk.evaluate()?;
+        // 账户门槛（熔断）与市场门槛（risk-off 目标仓位）独立判断
+        let acct_ok = report.can_buy;
+        let mkt_ok = report.max_total_pct > 0.0;
+        let npos = self.acct.lock().unwrap().positions().map(|p| p.len()).unwrap_or(0);
         log::info!(
-            "[{}][决策] 市场{} 目标仓位{} 可买入={} 强制卖出{}笔",
-            self.name, report.regime, report.max_total_pct, report.can_buy, report.forced_sells.len()
+            "[{}][决策] 市场{} 目标仓位{:.0}% 账户可买={} 强制卖出{}笔 当前持仓{}只",
+            self.name, report.regime, report.max_total_pct * 100.0, acct_ok, report.forced_sells.len(), npos
         );
         // 风控强制卖出优先执行
         self.execute_sells(&report.forced_sells).await?;
 
-        // 只有市场允许才做 AI 决策（risk-off 时只减不买，直接跳过）
-        if !report.can_buy || report.max_total_pct <= 0.0 {
-            if !report.can_buy {
-                log::info!("[{}][决策] 熔断/回撤中，跳过本轮", self.name);
+        // 门槛不满足则跳过买入
+        if !acct_ok || !mkt_ok {
+            let reason = if !acct_ok {
+                "账户熔断/回撤中"
+            } else if report.regime == "risk-off" {
+                "市场走弱(risk-off)，只减不买"
             } else {
-                log::info!("[{}][决策] 市场 {} 只减不买，跳过", self.name, report.regime);
-            }
+                "市场中性，暂不追买"
+            };
+            log::info!("[{}][决策] 空仓{}，{}，本轮不买入", self.name, if npos == 0 { "(空仓)" } else { "" }, reason);
+            // 留痕：被拦截的轮次也写入 AI 建议记录
+            self.decision.log_skip("hold", &format!("{}，当前持仓{}只", reason, npos));
             return Ok(());
         }
 
