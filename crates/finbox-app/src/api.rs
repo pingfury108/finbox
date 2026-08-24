@@ -256,7 +256,8 @@ pub async fn decisions(
 }
 
 fn fmt_date(ms: i64) -> String {
-    chrono::DateTime::from_timestamp_millis(ms)
+    // date_ms 为 Asia/Shanghai 零点毫秒，格式化需加 8h 偏移（否则 UTC 会少一天）
+    chrono::DateTime::from_timestamp_millis(ms + 8 * 3600 * 1000)
         .map(|t| t.format("%Y-%m-%d").to_string())
         .unwrap_or_default()
 }

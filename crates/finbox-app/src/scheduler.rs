@@ -48,6 +48,8 @@ pub struct Scheduler {
     last_collect: i64,
     /// 今日盘前同步标记
     pre_open_done: bool,
+    /// 今日收盘后是否已同步日K
+    after_close_synced: bool,
 }
 
 impl Scheduler {
@@ -55,7 +57,7 @@ impl Scheduler {
         let market = accounts::open_market(&cfg.data_dir)?;
         let client = Client::new(cfg.hithink_api_key.clone())?;
         let collector = Collector::new(client, market.clone());
-        Ok(Self { cfg, market, collector, last_collect: 0, pre_open_done: false })
+        Ok(Self { cfg, market, collector, last_collect: 0, pre_open_done: false, after_close_synced: false })
     }
 
     /// 主循环：采集任务 + 账户动态发现 + Web 界面，同进程并行。
@@ -123,9 +125,20 @@ impl Scheduler {
                         self.last_collect = min;
                     }
                 }
+                // 收盘后 15:30：同步当天日K（盘前只到昨日，当天日K收盘后才产生）
+                if trading_day && minute >= 15 * 60 + 30 && !self.after_close_synced {
+                    self.refresh_collector_key()?;
+                    let days = self.collector.client.trading_days().await?;
+                    self.collector.sync_daily_bars(std::path::Path::new("data/dumps"), &days).await?;
+                    // 指数日K也补当天
+                    let _ = self.collector.sync_index_bars(1200).await;
+                    log::info!("[采集][收盘后] 当日日K+指数同步完成");
+                    self.after_close_synced = true;
+                }
 
                 if minute < 9 * 60 {
                     self.pre_open_done = false;
+                    self.after_close_synced = false;
                 }
             }
 
