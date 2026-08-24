@@ -8,7 +8,7 @@ use axum::{
     extract::State,
     http::{header, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
-    routing::get,
+    routing::{get, post},
     Form, Router,
 };
 use rust_embed::RustEmbed;
@@ -53,11 +53,11 @@ pub async fn serve(cfg: &Config, bind: &str) -> anyhow::Result<()> {
 
 pub fn router(state: WebState) -> Router {
     Router::new()
-        .route("/", get(overview))
+        .route("/", get(home_page))
         .route("/market", get(market_page))
-        .route("/positions", get(positions_page))
-        .route("/trades", get(trades_page))
-        .route("/decisions", get(decisions_page))
+        .route("/account/{name}", get(account_page))
+        .route("/account/{name}/edit", get(account_settings_page))
+        .route("/api/account/{name}/settings", post(account_settings_save))
         .route("/settings", get(settings_page).post(save_settings))
         .route("/accounts/new", get(new_account_page).post(create_account))
         // JSON API
@@ -108,12 +108,9 @@ fn layout(title: &str, active: &str, body: &str) -> Html<String> {
 </head><body>
 <header class="topbar">
   <div class="brand">finbox <span class="brand-sub">AI 模拟交易</span></div>
-  <nav class="mainnav">{navo}{navm}{navp}{navt}{navd}{navs}
+  <nav class="mainnav">{navo}{navm}{navs}
     <a class="btn-new" href="/accounts/new">+ 新建账户</a>
   </nav>
-  <div class="acct-switch">
-    <select id="acct-select"><option>选择账户…</option></select>
-  </div>
 </header>
 <main class="content">{body}</main>
 <footer class="foot">finbox · 模拟盘数据仅供学习，非投资建议</footer>
@@ -121,46 +118,95 @@ fn layout(title: &str, active: &str, body: &str) -> Html<String> {
 <script>window.ACTIVE_ACCT = localStorage.getItem('finbox_acct') || '';</script>
 <script src="/static/app.js"></script>
 </body></html>"#,
-        navo = nav("", "概览"),
+        navo = nav("", "模拟"),
         navm = nav("market", "行情"),
-        navp = nav("positions", "持仓"),
-        navt = nav("trades", "交易"),
-        navd = nav("decisions", "AI 建议"),
         navs = nav("settings", "设置"),
     ))
 }
 
-// ---- 概览 ----
-async fn overview(State(_st): State<WebState>) -> impl IntoResponse {
-    let body = r#"<div class="acct-mgmt" id="acct-mgmt"></div>
-<div class="cards" id="ov-cards"></div>
-<div class="grid-2">
-  <section class="panel">
-    <h2>资产曲线</h2>
-    <div id="equity-chart" class="chart"></div>
-  </section>
-  <section class="panel">
-    <h2>当前持仓</h2>
-    <table class="tbl" id="ov-positions"><thead><tr>
-      <th>代码</th><th>名称</th><th>数量</th><th>成本</th><th>现价</th><th>浮动盈亏</th></tr></thead>
-      <tbody></tbody></table>
-    <div class="empty" id="ov-pos-empty">（空仓）</div>
-  </section>
-</div>
-<div class="grid-2">
-  <section class="panel"><h2>最近成交</h2>
-    <table class="tbl" id="ov-trades"><thead><tr>
-      <th>时间</th><th>方向</th><th>代码</th><th>数量</th><th>价格</th></tr></thead>
-      <tbody></tbody></table></section>
-  <section class="panel"><h2>最近 AI 建议</h2>
-    <div id="ov-decisions"></div></section>
+// ---- 模拟主页：账户列表 ----
+async fn home_page() -> impl IntoResponse {
+    let body = r#"<div class="panel">
+  <div class="panel-head"><h2>模拟账户</h2><a class="btn-new" href="/accounts/new">+ 新建账户</a></div>
+  <div class="acct-grid" id="acct-grid"></div>
+  <div class="empty" id="acct-empty" style="display:none">还没有账户，点击右上角「+ 新建账户」开始</div>
 </div>"#;
-    layout("概览", "overview", body)
+    layout("模拟", "", body)
 }
 
+// ---- 账户详情页 ----
+async fn account_page(State(st): State<WebState>, axum::extract::Path(name): axum::extract::Path<String>) -> impl IntoResponse {
+    // 校验账户存在
+    if accounts::open_account(&st.cfg.data_dir, &name).is_err() {
+        return layout("账户不存在", "", &format!("<p class='empty'>账户「{}」不存在，<a href='/'>返回模拟</a></p>", esc(&name)));
+    }
+    let name_esc = esc(&name);
+    let body = format!(r#"<p><a href="/" class="back">← 返回模拟</a></p>
+<div class="panel-head"><h2 id="acct-title">账户「{name}」</h2>
+  <a class="btn-ghost" href="/account/{name}/edit">参数设置</a></div>
+<div class="cards" id="acct-cards"></div>
+<div class="panel"><h2>资产曲线</h2><div id="equity-chart" class="chart"></div></div>
+<div class="tabs" id="acct-tabs">
+  <button class="tab active" data-tab="positions">持仓</button>
+  <button class="tab" data-tab="trades">成交</button>
+  <button class="tab" data-tab="decisions">AI 建议</button>
+</div>
+<div class="tab-pane" id="tab-positions"></div>
+<div class="tab-pane" id="tab-trades" style="display:none"></div>
+<div class="tab-pane" id="tab-decisions" style="display:none"></div>"#, name = name_esc);
+    layout(&format!("{name} · 账户"), "account", &body)
+}
+
+// ---- 账户参数页 ----
+async fn account_settings_page(State(st): State<WebState>, axum::extract::Path(name): axum::extract::Path<String>) -> impl IntoResponse {
+    let Ok(acct) = accounts::open_account(&st.cfg.data_dir, &name) else {
+        return layout("账户不存在", "", &format!("<p class='empty'>账户「{name}」不存在，<a href='/'>返回模拟</a></p>"));
+    };
+    let db = acct.lock().unwrap();
+    let get = |k: &str, def: &str| db.meta_get(k).ok().flatten().unwrap_or_else(|| def.to_string());
+    let capital = db.get_or_init_account(0.0).map(|a| a.initial_capital.to_string()).unwrap_or_default();
+    let body = format!(r#"<p><a href="/account/{name}" class="back">← 返回账户</a></p>
+<section class="panel"><h2>账户参数 · {name}</h2>
+<form method=post action="/api/account/{name}/settings" class="form">
+  <label>初始资金(元) <input name=initial_capital value="{capital}" type=number></label>
+  <label>自选池(逗号分隔) <input name=watchlist value="{wl}"></label>
+  <label>决策间隔(分钟) <input name=decision_interval_minutes value="{di}" type=number></label>
+  <label>候选股数量 <input name=candidate_count value="{cc}" type=number></label>
+  <button type=submit>保存</button>
+</form></section>"#,
+        name = esc(&name), capital = esc(&capital), wl = esc(&get("watchlist", "")),
+        di = esc(&get("decision_interval_minutes", "30")), cc = esc(&get("candidate_count", "5")));
+    layout(&format!("{name} · 参数"), "account", &body)
+}
+
+#[derive(Deserialize)]
+struct AccountSettingsForm {
+    initial_capital: f64,
+    watchlist: String,
+    decision_interval_minutes: u64,
+    candidate_count: usize,
+}
+
+/// 保存账户参数（写账户库 meta，热生效）。
+async fn account_settings_save(
+    State(st): State<WebState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    Form(form): Form<AccountSettingsForm>,
+) -> Result<Redirect, StatusCode> {
+    let acct = accounts::open_account(&st.cfg.data_dir, &name).map_err(|_| StatusCode::NOT_FOUND)?;
+    let db = acct.lock().unwrap();
+    db.meta_set("initial_capital", &form.initial_capital.to_string()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    db.meta_set("watchlist", &form.watchlist).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    db.meta_set("decision_interval_minutes", &form.decision_interval_minutes.to_string()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    db.meta_set("candidate_count", &form.candidate_count.to_string()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // 同步账户表初始资金（仅当账户现金未动过时）
+    let _ = db.get_or_init_account(form.initial_capital);
+    Ok(Redirect::to(&format!("/account/{name}")))
+}
+
+
 // ---- 行情页（K线）----
-async fn market_page() -> impl IntoResponse {
-    let body = r#"<div class="panel">
+async fn market_page() -> impl IntoResponse {    let body = r#"<div class="panel">
   <div class="index-tabs" id="index-tabs"></div>
   <div class="searchbar" style="margin-top:12px">
     <input id="sym-search" placeholder="搜索个股：输入代码或名称，如 600519 / 贵州茅台" autocomplete="off">
@@ -175,32 +221,6 @@ async fn market_page() -> impl IntoResponse {
   <div id="kline-chart" class="chart chart-lg"></div>
 </section>"#;
     layout("行情", "market", body)
-}
-
-// ---- 持仓 ----
-async fn positions_page() -> impl IntoResponse {
-    let body = r#"<section class="panel"><h2>持仓</h2>
-    <table class="tbl" id="pos-table"><thead><tr>
-      <th>代码</th><th>名称</th><th>数量</th><th>成本</th><th>现价</th><th>浮动盈亏</th><th>盈亏率</th></tr></thead>
-      <tbody></tbody></table>
-    <div class="empty" id="pos-empty">（空仓）</div></section>"#;
-    layout("持仓", "positions", body)
-}
-
-// ---- 交易 ----
-async fn trades_page() -> impl IntoResponse {
-    let body = r#"<section class="panel"><h2>成交流水</h2>
-    <table class="tbl" id="trades-table"><thead><tr>
-      <th>时间</th><th>方向</th><th>代码</th><th>名称</th><th>数量</th><th>价格</th><th>金额</th><th>费用</th></tr></thead>
-      <tbody></tbody></table></section>"#;
-    layout("交易", "trades", body)
-}
-
-// ---- AI 建议 ----
-async fn decisions_page() -> impl IntoResponse {
-    let body = r#"<section class="panel"><h2>AI 决策记录</h2>
-    <div id="dec-list"></div></section>"#;
-    layout("AI 建议", "decisions", body)
 }
 
 // ---- 设置 ----
