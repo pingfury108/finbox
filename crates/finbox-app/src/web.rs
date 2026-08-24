@@ -107,13 +107,11 @@ fn layout(title: &str, active: &str, body: &str) -> Html<String> {
 <link rel="stylesheet" href="/static/style.css">
 </head><body>
 <header class="topbar">
-  <div class="brand">finbox <span class="brand-sub">AI 模拟交易</span></div>
-  <nav class="mainnav">{navo}{navm}{navs}
-    <a class="btn-new" href="/accounts/new">+ 新建账户</a>
-  </nav>
+  <div class="brand">finbox</div>
+  <nav class="mainnav">{navo}{navm}{navs}</nav>
 </header>
 <main class="content">{body}</main>
-<footer class="foot">finbox · 模拟盘数据仅供学习，非投资建议</footer>
+<footer class="foot">finbox</footer>
 <script src="/static/echarts.min.js"></script>
 <script>window.ACTIVE_ACCT = localStorage.getItem('finbox_acct') || '';</script>
 <script src="/static/app.js"></script>
