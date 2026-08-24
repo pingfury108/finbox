@@ -227,6 +227,7 @@ impl AccountCtx {
     /// 账户任务主循环：盘中风控 + 收盘决策。
     /// 交易日历由采集任务盘前刷新；这里按“工作日 + 时段”运行，避免旧日历误判。
     async fn run_account(&mut self) -> anyhow::Result<()> {
+        log::info!("[{}] 账户任务启动，开始监控", self.name);
         loop {
             let now = Local::now();
             let weekday_iso = now.weekday().num_days_from_monday() + 1;

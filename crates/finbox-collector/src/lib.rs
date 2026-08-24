@@ -6,6 +6,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use finbox_store::{DailyBarRow, SharedDb, SnapshotRow, TickerRow, TradingDayRow};
+use log::info;
 use hithink_sdk::{Client, DumpKind, TradingDaysData};
 
 /// 增量 dump 覆盖窗口（交易日）。落后超过此交易日数时必须全量重拉。
@@ -52,6 +53,7 @@ impl Collector {
         }
         let n = all.len();
         self.db.lock().unwrap().upsert_tickers(&all)?;
+        info!("[数据] 代码表同步完成: {n} 只标的");
         Ok(n)
     }
 
@@ -70,6 +72,7 @@ impl Collector {
             .collect();
         let n = rows.len();
         self.db.lock().unwrap().upsert_trading_days(&rows)?;
+        info!("[数据] 交易日历同步完成: {n} 天");
         Ok(n)
     }
 
@@ -79,6 +82,7 @@ impl Collector {
         self.client.download_dump(DumpKind::DailyK, &dest).await?;
         let n = self.db.lock().unwrap().import_daily_k_parquet(&dest)?;
         self.db.lock().unwrap().meta_set("last_daily_k_full_sync", &now_ms().to_string())?;
+        info!("[数据] 全量日K导入完成: {n} 行 (全市场10年)");
         Ok(n)
     }
 
@@ -88,6 +92,7 @@ impl Collector {
         self.client.download_dump(DumpKind::AdjustmentFactors, &dest).await?;
         let n = self.db.lock().unwrap().import_adjustment_factors_parquet(&dest)?;
         self.db.lock().unwrap().meta_set("last_adjustment_sync", &now_ms().to_string())?;
+        info!("[数据] 复权事件导入完成: {n} 行");
         Ok(n)
     }
 
@@ -105,6 +110,7 @@ impl Collector {
                     self.client.download_dump(DumpKind::DailyK10d, &dest).await?;
                     let n = self.db.lock().unwrap().import_daily_k_parquet(&dest)?;
                     self.db.lock().unwrap().meta_set("last_daily_k_sync", &now_ms().to_string())?;
+                    info!("[数据] 日K增量导入完成: {n} 行 (近10交易日)");
                     Ok(n)
                 }
             }
@@ -143,7 +149,7 @@ impl Collector {
                 })
                 .collect();
             let n = self.db.lock().unwrap().insert_daily_bars(&rows)?;
-            println!("[指数] {name}({code}) 写入 {n} 根日K");
+            info!("[数据] 指数 {name}({code}) 日K: {n} 根");
             total += n;
         }
         Ok(total)
@@ -190,6 +196,7 @@ impl Collector {
         if let Some(ts) = ts_ms {
             self.db.lock().unwrap().meta_set("last_snapshot_ts", &ts.to_string())?;
         }
+        info!("[数据] 全市场快照采集完成: {total} 只");
         Ok(total)
     }
 }

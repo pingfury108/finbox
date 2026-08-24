@@ -11,6 +11,7 @@ mod screen;
 
 use finbox_core::OrderIntent;
 use finbox_store::{DecisionLog, SharedDb};
+use log::{info, warn};
 use thiserror::Error;
 
 pub use screen::Candidate;
@@ -71,6 +72,10 @@ impl DecisionEngine {
             let m = self.market.lock().unwrap();
             screen::screen(&m, candidate_count)?
         };
+        info!("初筛完成：{} 只候选", candidates.len());
+        for c in &candidates {
+            info!("  候选 {} {} 现价{:.2} 涨幅{:.2}% 评分{:.2}", c.thscode, c.name, c.price, c.pct, c.score);
+        }
         let ctx = {
             let (m, a) = (self.market.clone(), self.acct.clone());
             context::build_context(&m, &a, &self.watchlist, &candidates)?
@@ -89,10 +94,12 @@ impl DecisionEngine {
 
         // 复制配置再释放锁，避免跨 await 持锁
         let llm_cfg = self.config.lock().unwrap().clone();
+        info!("调用 LLM: {} 模型 {}", llm_cfg.base_url, llm_cfg.model);
         let raw = match llm::chat(&llm_cfg, &ctx).await {
             Ok(r) => r,
             Err(e) => {
                 let note = format!("LLM 调用失败: {e}");
+                warn!("{note}");
                 let log = self.log_decision(&ctx, "", "[]", "error", &note);
                 return Ok(DecisionResult {
                     intents: vec![],
@@ -103,6 +110,7 @@ impl DecisionEngine {
                 });
             }
         };
+        info!("LLM 返回 {} 字符", raw.len());
 
         let parsed = match llm::parse(&raw) {
             Ok(p) => p,
@@ -124,6 +132,10 @@ impl DecisionEngine {
         // 决策与成交关联：意图带上决策日志 id
         for i in intents.iter_mut() {
             i.decision_id = Some(log);
+        }
+        info!("AI 决策完成: 状态={} 意图{}条 comment={}", "parsed", intents.len(), parsed.comment);
+        for i in &intents {
+            info!("  意图 {} {} {}股", i.side.as_str(), i.thscode, i.quantity);
         }
         Ok(DecisionResult {
             intents,
