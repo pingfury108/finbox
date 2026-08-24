@@ -4,18 +4,24 @@
 //! 顶部导航 + 账户切换器；数据经 JSON API 加载，图表用 ECharts（本地静态）。
 
 use axum::{
+    body::Body,
     extract::State,
-    http::StatusCode,
-    response::{Html, IntoResponse, Redirect},
+    http::{header, StatusCode},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::get,
     Form, Router,
 };
+use rust_embed::RustEmbed;
 use serde::Deserialize;
-use tower_http::services::ServeDir;
 
 use crate::accounts;
 use crate::config::Config;
 use crate::{api};
+
+/// 静态资源（编译期嵌入，单二进制自包含）。
+#[derive(RustEmbed)]
+#[folder = "static/"]
+struct Static;
 
 pub struct WebState {
     pub cfg: Config,
@@ -63,9 +69,29 @@ pub fn router(state: WebState) -> Router {
         .route("/api/account/{name}/trades", get(api::trades))
         .route("/api/account/{name}/decisions", get(api::decisions))
         .route("/api/account/{name}", axum::routing::delete(api::delete_account))
-        // 静态资源（echarts 等）
-        .nest_service("/static", ServeDir::new("crates/finbox-app/static"))
+        // 静态资源（编译期嵌入）
+        .route("/static/{file}", get(static_file))
         .with_state(state)
+}
+
+/// 从嵌入资源提供静态文件（style.css / app.js / echarts.min.js）。
+async fn static_file(axum::extract::Path(file): axum::extract::Path<String>) -> Response {
+    match Static::get(&file) {
+        Some(content) => {
+            let mime = match file.rsplit('.').next().unwrap_or("") {
+                "css" => "text/css; charset=utf-8",
+                "js" => "application/javascript; charset=utf-8",
+                "html" => "text/html; charset=utf-8",
+                _ => "application/octet-stream",
+            };
+            (
+                [(header::CONTENT_TYPE, mime)],
+                Body::from(content.data.into_owned()),
+            )
+                .into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 /// 顶部导航 + 账户切换器。

@@ -286,7 +286,7 @@
           axisLabel: { color: '#8b949e' } },
       ],
       dataZoom: [
-        { type: 'inside', xAxisIndex: [0, 1], start: 40, end: 100 },
+        { type: 'inside', xAxisIndex: [0, 1], start: 82, end: 100 },
         { type: 'slider', xAxisIndex: [0, 1], bottom: 2, height: 16,
           borderColor: '#2a3140', fillerColor: 'rgba(88,166,255,0.1)' },
       ],
