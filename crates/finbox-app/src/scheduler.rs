@@ -224,23 +224,36 @@ fn read_acct_conf(cfg: &Config, acct: &SharedDb) -> AcctConf {
 }
 
 impl AccountCtx {
-    /// 账户任务主循环：盘中风控 + 收盘决策。
-    /// 交易日历由采集任务盘前刷新；这里按“工作日 + 时段”运行，避免旧日历误判。
+    /// 账户任务主循环：盘中持续监控。
+    /// - 风控（止损/止盈/超期）：盘中每 60s 实时检查，情况不妙立即卖出
+    /// - AI 决策（买入/主动性卖出）：盘中每 DECISION_INTERVAL 分钟评估一次
+    /// - 收盘 15:05：复盘 + 账户快照
     async fn run_account(&mut self) -> anyhow::Result<()> {
         log::info!("[{}] 账户任务启动，开始监控", self.name);
+        let mut last_decision_min = 0i64;
         loop {
             let now = Local::now();
             let weekday_iso = now.weekday().num_days_from_monday() + 1;
             let minute = now.hour() * 60 + now.minute();
+            let min = now.timestamp() / 60;
 
             if weekday_iso < 6 {
-                // 盘中：风控监控（止损/止盈/超期）
+                // 盘中（9:30-15:00）
                 if minute >= 9 * 60 + 30 && minute < 15 * 60 {
+                    // ① 风控实时监控（每 60s）：止损/止盈/超期 → 立即卖出
                     self.intraday_risk().await?;
+
+                    // ② AI 定期决策（每 DECISION_INTERVAL 分钟）：买入/主动性卖出
+                    let interval = self.decision_interval();
+                    if min - last_decision_min >= interval as i64 {
+                        self.periodic_decision().await?;
+                        last_decision_min = min;
+                    }
                 }
-                // 收盘：风控 + 决策 + 复盘 + 快照
+                // 收盘后 15:05：复盘 + 账户快照（每天一次）
                 if minute >= 15 * 60 + 5 && !self.closed_today {
-                    self.close_process().await?;
+                    self.review_old_decisions().await?;
+                    self.snapshot_account().await?;
                     self.closed_today = true;
                 }
                 if minute < 9 * 60 {
@@ -252,6 +265,17 @@ impl AccountCtx {
         }
     }
 
+    /// 决策间隔（分钟）：账户库 meta 可配置，默认 30。
+    fn decision_interval(&self) -> u64 {
+        let db = self.acct.lock().unwrap();
+        db.meta_get("decision_interval_minutes")
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(30)
+    }
+
+    /// 盘中风控：止损/止盈/超期，触发生成卖出并执行。
     async fn intraday_risk(&self) -> anyhow::Result<()> {
         let report = self.risk.evaluate()?;
         if !report.forced_sells.is_empty() {
@@ -261,31 +285,27 @@ impl AccountCtx {
         Ok(())
     }
 
-    /// 收盘流程：① 风控强制卖出 ② 每日决策买入 ③ 复盘 ④ 账户快照。
-    async fn close_process(&self) -> anyhow::Result<()> {
-        log::info!("[{}][收盘] 开始每日结算", self.name);
-        let conf = read_acct_conf(&self.cfg, &self.acct);
-        let _ = conf;
-
+    /// 定期 AI 决策：风控门控 → 初筛+LLM → 买入/卖出意图执行。
+    async fn periodic_decision(&self) -> anyhow::Result<()> {
         let report = self.risk.evaluate()?;
-        self.execute_sells(&report.forced_sells).await?;
         log::info!(
-            "[{}][风控] 市场{} 目标仓位{} 可买入={} 强制卖出{}笔",
+            "[{}][决策] 市场{} 目标仓位{} 可买入={} 强制卖出{}笔",
             self.name, report.regime, report.max_total_pct, report.can_buy, report.forced_sells.len()
         );
+        // 风控强制卖出优先执行
+        self.execute_sells(&report.forced_sells).await?;
 
-        if report.can_buy && report.max_total_pct > 0.0 {
-            self.daily_decision(&report).await?;
+        // 只有市场允许才做 AI 决策（risk-off 时只减不买，直接跳过）
+        if !report.can_buy || report.max_total_pct <= 0.0 {
+            if !report.can_buy {
+                log::info!("[{}][决策] 熔断/回撤中，跳过本轮", self.name);
+            } else {
+                log::info!("[{}][决策] 市场 {} 只减不买，跳过", self.name, report.regime);
+            }
+            return Ok(());
         }
 
-        self.review_old_decisions().await?;
-        self.snapshot_account().await?;
-        Ok(())
-    }
-
-    async fn daily_decision(&self, report: &finbox_trader::RiskReport) -> anyhow::Result<()> {
         let conf = read_acct_conf(&self.cfg, &self.acct);
-        // 热加载 LLM 配置（页面改 key 即时生效）
         let defaults = LlmConfig {
             base_url: self.cfg.llm_base_url.clone(),
             api_key: self.cfg.llm_api_key.clone(),
@@ -295,20 +315,32 @@ impl AccountCtx {
         let result = self.decision.decide(conf.candidate_count).await?;
         log::info!("[{}][决策] 状态 {} 意图 {} 条", self.name, result.status, result.intents.len());
         for intent in &result.intents {
-            if intent.side != finbox_core::OrderSide::Buy {
-                continue;
+            match intent.side {
+                finbox_core::OrderSide::Buy => self.execute_buy(intent, report.max_total_pct).await?,
+                finbox_core::OrderSide::Sell => {
+                    // AI 主动性卖出（趋势走坏/到目标）
+                    match self.broker.submit(intent.clone()).await {
+                        Ok(e) => log::info!("[{}][成交] 卖出 {} {}股 @ {:.2}", self.name, e.intent.thscode, e.intent.quantity, e.price),
+                        Err(e) => log::info!("[{}][拒单] 卖出 {}: {e}", self.name, intent.thscode),
+                    }
+                }
             }
-            let qty = self.position_size(intent, report.max_total_pct).await;
-            if qty < 100 {
-                log::info!("[{}][决策] {} 仓位不足一手，跳过", self.name, intent.thscode);
-                continue;
-            }
-            let mut i = intent.clone();
-            i.quantity = qty;
-            match self.broker.submit(i.clone()).await {
-                Ok(e) => log::info!("[{}][成交] {} {} {}股 @ {:.2}", self.name, e.intent.side.as_str(), e.intent.thscode, e.intent.quantity, e.price),
-                Err(e) => log::info!("[{}][拒单] {}: {e}", self.name, i.thscode),
-            }
+        }
+        Ok(())
+    }
+
+    /// 执行买入：数量由系统按仓位约束计算。
+    async fn execute_buy(&self, intent: &finbox_core::OrderIntent, max_total_pct: f64) -> anyhow::Result<()> {
+        let qty = self.position_size(intent, max_total_pct).await;
+        if qty < 100 {
+            log::info!("[{}][决策] {} 仓位不足一手，跳过", self.name, intent.thscode);
+            return Ok(());
+        }
+        let mut i = intent.clone();
+        i.quantity = qty;
+        match self.broker.submit(i.clone()).await {
+            Ok(e) => log::info!("[{}][成交] 买入 {} {}股 @ {:.2}", self.name, e.intent.thscode, e.intent.quantity, e.price),
+            Err(e) => log::info!("[{}][拒单] 买入 {}: {e}", self.name, i.thscode),
         }
         Ok(())
     }
