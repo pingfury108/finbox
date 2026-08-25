@@ -64,6 +64,8 @@ pub fn router(state: WebState) -> Router {
         .route("/api/search", get(api::search_symbols))
         .route("/api/kline/{code}", get(api::kline))
         .route("/api/accounts", get(api::accounts))
+        .route("/api/market/overview", get(api::market_overview))
+        .route("/api/decisions/recent", get(api::recent_decisions))
         .route("/api/account/{name}/equity", get(api::equity))
         .route("/api/account/{name}/positions", get(api::positions))
         .route("/api/account/{name}/trades", get(api::trades))
@@ -109,7 +111,9 @@ fn layout(title: &str, active: &str, body: &str) -> Html<String> {
 <header class="topbar">
   <div class="brand">finbox</div>
   <nav class="mainnav">{navo}{navm}{navs}</nav>
+  <div class="sys-status" id="sys-status"></div>
 </header>
+<div class="statusbar" id="statusbar"></div>
 <main class="content">{body}</main>
 <footer class="foot">finbox</footer>
 <script src="/static/echarts.min.js"></script>
@@ -122,12 +126,17 @@ fn layout(title: &str, active: &str, body: &str) -> Html<String> {
     ))
 }
 
-// ---- 模拟主页：账户列表 ----
+// ---- 模拟主页：账户列表（驾驶舱） ----
 async fn home_page() -> impl IntoResponse {
-    let body = r#"<div class="panel">
+    let body = r#"<div class="overview-cards" id="overview-cards"></div>
+<div class="panel">
   <div class="panel-head"><h2>模拟账户</h2><a class="btn-new" href="/accounts/new">+ 新建账户</a></div>
   <div class="acct-grid" id="acct-grid"></div>
   <div class="empty" id="acct-empty" style="display:none">还没有账户，点击右上角「+ 新建账户」开始</div>
+</div>
+<div class="panel">
+  <h2>今日决策动态</h2>
+  <div id="decision-feed" class="feed"></div>
 </div>"#;
     layout("模拟", "", body)
 }

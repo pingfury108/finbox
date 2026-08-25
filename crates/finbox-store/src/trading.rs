@@ -166,6 +166,19 @@ impl Db {
         Ok(v)
     }
 
+    /// 最新快照完整行情（现价/涨额/涨幅%/时间戳）。
+    pub fn latest_snapshot_full(&self, thscode: &str) -> Result<Option<(f64, f64, f64, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT last_price, price_change, price_change_ratio_pct, ts_ms FROM snapshots
+             WHERE thscode = ? ORDER BY ts_ms DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query(duckdb::params![thscode])?;
+        match rows.next()? {
+            Some(r) => Ok(Some((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))),
+            None => Ok(None),
+        }
+    }
+
     /// 某标的今日行情快照（盘中实时）。返回 (最新价, 今开, 今日最高, 今日最低, 今日累计量)。
     /// 盘中未采集返回 None。
     pub fn today_snapshot(&self, thscode: &str) -> Result<Option<(f64, f64, f64, f64, f64)>> {

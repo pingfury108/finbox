@@ -47,6 +47,41 @@ pub struct AccountAsset {
     pub total: f64,
     pub return_pct: f64,
     pub position_count: usize,
+    /// 今日盈亏（当前真实总市值 - 最近收盘快照总资产）
+    pub today_pnl: f64,
+    /// 迷你曲线数据（最近资产快照序列）
+    pub sparkline: Vec<f64>,
+}
+
+/// 指数实时行情（状态条用）。
+#[derive(Serialize)]
+pub struct IndexQuote {
+    pub thscode: String,
+    pub name: String,
+    pub price: f64,
+    pub pct: f64,
+}
+
+/// 市场总览（全局状态条）。
+#[derive(Serialize)]
+pub struct MarketOverview {
+    pub indexes: Vec<IndexQuote>,
+    /// 上涨家数 / 总家数
+    pub up: u32,
+    pub total: u32,
+    /// 市场状态：risk-on / neutral / risk-off
+    pub regime: String,
+    /// 最新快照时间戳（毫秒）
+    pub ts_ms: i64,
+}
+
+/// 全局决策时间线条目。
+#[derive(Serialize)]
+pub struct DecisionFeedItem {
+    pub account: String,
+    pub ts_ms: i64,
+    pub status: String,
+    pub note: String,
 }
 
 /// 资产曲线点。
@@ -128,29 +163,97 @@ pub async fn kline(
     Ok(Json(KlineResponse { thscode, name, points }))
 }
 
-/// 账户列表（含资产）。
+/// 账户列表（含资产）。市值按行情库最新价计算（真实市值）。
 pub async fn accounts(State(st): State<WebState>) -> Json<Vec<AccountAsset>> {
     let list = accounts::list_accounts(&st.cfg.data_dir).unwrap_or_default();
     let mut out = Vec::new();
     for a in &list {
         if let Ok(acct) = accounts::open_account(&st.cfg.data_dir, &a.name) {
+            let (cash, positions, initial, sparkline, last_snap) = {
+                let db = acct.lock().unwrap();
+                let ac = match db.get_or_init_account(st.cfg.initial_capital) {
+                    Ok(x) => x,
+                    Err(_) => continue,
+                };
+                let sp: Vec<f64> = db.account_snapshots().unwrap_or_default()
+                    .iter().map(|s| s.total_asset).collect();
+                let last = sp.last().copied();
+                (ac.cash, db.positions().unwrap_or_default(), ac.initial_capital, sp, last)
+            };
+            // 真实市值：持仓按行情库最新价
+            let mv: f64 = {
+                let m = st.market.lock().unwrap();
+                positions.iter()
+                    .map(|p| m.latest_snapshot_price(&p.thscode).ok().flatten().unwrap_or(p.avg_cost) * p.quantity as f64)
+                    .sum()
+            };
+            let total = cash + mv;
+            let rp = if initial > 0.0 { (total / initial - 1.0) * 100.0 } else { 0.0 };
+            let today_pnl = last_snap.map(|prev| total - prev).unwrap_or(0.0);
+            out.push(AccountAsset {
+                name: a.name.clone(),
+                cash,
+                market_value: mv,
+                total,
+                return_pct: rp,
+                position_count: positions.len(),
+                today_pnl,
+                sparkline: sparkline.iter().rev().take(20).rev().cloned().collect(),
+            });
+        }
+    }
+    Json(out)
+}
+
+/// 市场总览（全局状态条）：指数实时 + 涨跌家数 + 市场状态。
+pub async fn market_overview(State(st): State<WebState>) -> Json<MarketOverview> {
+    const INDEXES: &[(&str, &str)] = &[
+        ("000001.SH", "上证指数"),
+        ("399001.SZ", "深证成指"),
+        ("399006.SZ", "创业板指"),
+        ("000300.SH", "沪深300"),
+        ("000905.SH", "中证500"),
+    ];
+    let m = st.market.lock().unwrap();
+    let mut indexes = Vec::new();
+    let mut latest_ts = 0i64;
+    for (code, name) in INDEXES {
+        let quote = m.latest_snapshot_full(code).ok().flatten();
+        if let Some((price, _chg, pct, ts)) = quote {
+            if ts > latest_ts { latest_ts = ts; }
+            indexes.push(IndexQuote { thscode: code.to_string(), name: name.to_string(), price, pct });
+        } else if let Ok(Some(b)) = m.recent_bars(code, 1).map(|v| v.into_iter().next()) {
+            indexes.push(IndexQuote { thscode: code.to_string(), name: name.to_string(), price: b.close, pct: 0.0 });
+        }
+    }
+    let (up, total) = m.market_breadth().unwrap_or((0, 0));
+    let regime = if total == 0 { "neutral" } else {
+        let r = up as f64 / total as f64;
+        if r >= 0.6 { "risk-on" } else if r >= 0.4 { "neutral" } else { "risk-off" }
+    }.to_string();
+    Json(MarketOverview { indexes, up, total, regime, ts_ms: latest_ts })
+}
+
+/// 全局决策时间线（合并所有账户，按时间倒序，limit 20）。
+pub async fn recent_decisions(State(st): State<WebState>) -> Json<Vec<DecisionFeedItem>> {
+    let list = accounts::list_accounts(&st.cfg.data_dir).unwrap_or_default();
+    let mut all = Vec::new();
+    for a in &list {
+        if let Ok(acct) = accounts::open_account(&st.cfg.data_dir, &a.name) {
             let db = acct.lock().unwrap();
-            if let Ok(ac) = db.get_or_init_account(st.cfg.initial_capital) {
-                let total = db.total_asset_estimate(&ac).unwrap_or(ac.cash);
-                let rp = if ac.initial_capital > 0.0 { (total / ac.initial_capital - 1.0) * 100.0 } else { 0.0 };
-                let npos = db.positions().unwrap_or_default().len();
-                out.push(AccountAsset {
-                    name: a.name.clone(),
-                    cash: ac.cash,
-                    market_value: total - ac.cash,
-                    total,
-                    return_pct: rp,
-                    position_count: npos,
+            for d in db.recent_decision_logs(10).unwrap_or_default() {
+                all.push(DecisionFeedItem {
+                    account: a.name.clone(),
+                    ts_ms: d.ts_ms,
+                    status: d.status.clone(),
+                    note: d.note.clone(),
                 });
             }
         }
     }
-    Json(out)
+    all.sort_by(|a, b| b.ts_ms.cmp(&a.ts_ms));
+    all.truncate(20);
+    Json(all)
 }
 
 /// 删除账户（含其全部数据）。

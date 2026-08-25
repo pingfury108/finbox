@@ -26,11 +26,70 @@
     return { parsed: '已解析', executed: '已执行', hold: '观望', rejected: '跳过', error: '出错' }[s] || s;
   }
 
-  // ========== 模拟主页：账户列表 ==========
+  // ========== 全局状态条（60s 轮询） ==========
+  let statusTimer = null;
+  async function renderStatusBar() {
+    const bar = document.getElementById('statusbar');
+    if (!bar) return;
+    let ov;
+    try { ov = await get('/api/market/overview'); } catch (e) { return; }
+    const ixHtml = ov.indexes.map(i =>
+      '<span class="ix"><span class="nm">' + esc(i.name) + '</span>' +
+      '<span class="pv ' + cls(i.pct) + '">' + fmt(i.price) + '</span>' +
+      '<span class="' + cls(i.pct) + '">' + pct(i.pct) + '</span></span>'
+    ).join('<span class="sep"></span>');
+    const regimeText = { 'risk-on': 'risk-on 积极', 'neutral': 'neutral 中性', 'risk-off': 'risk-off 防守' }[ov.regime] || ov.regime;
+    bar.innerHTML = ixHtml +
+      '<span class="sep"></span>' +
+      '<span class="breadth">涨 ' + ov.up + ' / ' + ov.total + '</span>' +
+      '<span class="regime ' + ov.regime + '">' + regimeText + '</span>';
+    // 系统状态灯：快照时间超过 10 分钟（非交易时段除外）提示
+    const sys = document.getElementById('sys-status');
+    if (sys) {
+      const lag = Date.now() - ov.ts_ms;
+      const stale = ov.ts_ms > 0 && lag > 10 * 60 * 1000;
+      sys.className = 'sys-status' + (stale ? ' stale' : '');
+      sys.innerHTML = '<span class="dot"></span>' +
+        (ov.ts_ms > 0 ? '数据 ' + fmtTime(ov.ts_ms) : '待采集');
+    }
+  }
+  function startStatusBar() {
+    renderStatusBar();
+    clearInterval(statusTimer);
+    statusTimer = setInterval(renderStatusBar, 60000);
+  }
+
+  // 迷你资产曲线（SVG sparkline，不引 ECharts 实例，轻量）
+  function sparklineSvg(data, w, h) {
+    if (!data || data.length < 2) return '<div class="empty" style="padding:8px">—</div>';
+    const min = Math.min.apply(null, data), max = Math.max.apply(null, data);
+    const range = max - min || 1;
+    const step = w / (data.length - 1);
+    const pts = data.map((v, i) => (i * step).toFixed(1) + ',' + (h - (v - min) / range * (h - 4) - 2).toFixed(1)).join(' ');
+    const up = data[data.length - 1] >= data[0];
+    const color = up ? 'var(--up)' : 'var(--down)';
+    return '<svg width="' + w + '" height="' + h + '" style="display:block">' +
+      '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.5"/></svg>';
+  }
+
+  // ========== 模拟主页：驾驶舱 ==========
   async function renderHome() {
     const grid = document.getElementById('acct-grid');
     if (!grid) return;
     const accts = await get('/api/accounts');
+
+    // 总览卡片（所有账户合计）
+    const ovCards = document.getElementById('overview-cards');
+    if (ovCards) {
+      const totalSum = accts.reduce((s, a) => s + a.total, 0);
+      const todaySum = accts.reduce((s, a) => s + a.today_pnl, 0);
+      const retSum = accts.length ? accts.reduce((s, a) => s + a.return_pct, 0) / accts.length : 0;
+      ovCards.innerHTML =
+        ovCard('总资产', '¥' + fmt(totalSum, 0), '') +
+        ovCard('今日盈亏', sign(todaySum) + fmt(todaySum, 0), cls(todaySum)) +
+        ovCard('平均收益率', pct(retSum), cls(retSum));
+    }
+
     const empty = document.getElementById('acct-empty');
     if (accts.length === 0) {
       grid.innerHTML = '';
@@ -43,8 +102,10 @@
       return '<div class="acct-card">' +
         '<div class="acct-card-name">' + esc(a.name) + '</div>' +
         '<div class="acct-card-total">¥' + fmt(a.total, 0) + '</div>' +
-        '<div class="acct-card-row">收益率 <span class="' + cls(rp) + '">' + pct(rp) + '</span></div>' +
-        '<div class="acct-card-row">持仓 <span>' + a.position_count + ' 只</span> · 现金 ¥' + fmt(a.cash, 0) + '</div>' +
+        '<div class="acct-card-today">今日 <span class="' + cls(a.today_pnl) + '">' + sign(a.today_pnl) + fmt(a.today_pnl, 0) + '</span>' +
+        ' · 收益率 <span class="' + cls(rp) + '">' + pct(rp) + '</span></div>' +
+        '<div class="acct-card-spark">' + sparklineSvg(a.sparkline, 180, 36) + '</div>' +
+        '<div class="acct-card-row">持仓 ' + a.position_count + ' 只 · 现金 ¥' + fmt(a.cash, 0) + '</div>' +
         '<div class="acct-card-ops">' +
           '<a class="btn-ghost" href="/account/' + encodeURIComponent(a.name) + '">查看</a>' +
           '<button class="del-btn" data-name="' + esc(a.name) + '">删除</button>' +
@@ -62,6 +123,40 @@
         } catch (e) { alert('删除失败：' + e); }
       });
     });
+
+    // 今日决策动态
+    renderDecisionFeed();
+
+    // 盘中自动刷新（60s）
+    if (!window._homeTimer) {
+      window._homeTimer = setInterval(() => {
+        if (document.getElementById('acct-grid')) { renderHome(); } else { clearInterval(window._homeTimer); window._homeTimer = null; }
+      }, 60000);
+    }
+  }
+
+  function ovCard(label, value, vcls) {
+    return '<div class="ov-card"><div class="label">' + label + '</div>' +
+      '<div class="value ' + (vcls || '') + '">' + value + '</div></div>';
+  }
+
+  async function renderDecisionFeed() {
+    const feed = document.getElementById('decision-feed');
+    if (!feed) return;
+    let items = [];
+    try { items = await get('/api/decisions/recent'); } catch (e) {}
+    if (items.length === 0) {
+      feed.innerHTML = '<div class="empty">今日暂无决策记录（交易日盘中每 30 分钟轮询）</div>';
+      return;
+    }
+    feed.innerHTML = items.map(d =>
+      '<div class="feed-item">' +
+      '<span class="feed-time">' + fmtTime(d.ts_ms) + '</span>' +
+      '<span class="feed-acct">' + esc(d.account) + '</span>' +
+      '<span class="status status-' + d.status + '">' + statusLabel(d.status) + '</span>' +
+      '<span class="feed-note">' + esc(d.note) + '</span>' +
+      '</div>'
+    ).join('');
   }
 
   // ========== 账户详情页 ==========
@@ -337,6 +432,7 @@
 
   // ---------- 初始化 ----------
   async function init() {
+    startStatusBar();
     try { await renderHome(); } catch (e) { console.error(e); }
     try { await renderAccount(); } catch (e) { console.error(e); }
     initMarket();
