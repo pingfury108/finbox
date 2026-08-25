@@ -14,7 +14,3 @@ clap = { workspace = true }
 dotenvy = { workspace = true }
 chrono = { workspace = true }
 log = "0.4"
-
-[[bin]]
-name = "finbox-collector"
-path = "src/main.rs"

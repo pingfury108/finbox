@@ -1,9 +1,9 @@
-//! finbox-app：主程序。
+//! finbox：主程序（单二进制）。
 //!
 //! 子命令：
-//! - `run`                  启动整个系统：采集 + 所有账户调度 + Web（唯一启动命令）
-//! - `account create/list/rm <name>`  账户管理
-//! - `decide --account <name>` 手动触发某账户一轮决策
+//! - `run`    启动整个系统：采集 + 所有账户调度 + Web（唯一启动命令）
+//! - `init`   首次全量建库（代码表 + 交易日历 + 10年日K + 复权，新环境执行一次）
+//! - `stats`  库内统计（排查用）
 
 mod accounts;
 mod api;
@@ -12,9 +12,10 @@ mod scheduler;
 mod web;
 
 use clap::{Parser, Subcommand};
+use finbox_collector::Collector;
 use finbox_store::open_market_shared;
+use std::path::PathBuf;
 
-use crate::accounts::AccountInfo;
 use crate::config::Config;
 use crate::scheduler::Scheduler;
 
@@ -33,32 +34,14 @@ enum Cmd {
         #[arg(long)]
         admin_key: Option<String>,
     },
-    /// 账户管理
-    #[command(subcommand)]
-    Account(AcctCmd),
-    /// 手动触发某账户一轮决策
-    Decide {
-        #[arg(long)]
-        account: String,
+    /// 首次全量建库：代码表 + 交易日历 + 全市场 10 年日 K + 复权事件
+    Init {
+        /// Parquet dump 缓存目录
+        #[arg(long, default_value = "data/dumps")]
+        dump_dir: PathBuf,
     },
-}
-
-#[derive(Subcommand)]
-enum AcctCmd {
-    /// 创建账户
-    Create {
-        name: String,
-        #[arg(long, default_value_t = 200000.0)]
-        capital: f64,
-        #[arg(long, default_value = "")]
-        watchlist: String,
-    },
-    /// 列出账户
-    List,
-    /// 删除账户
-    Rm { name: String },
-    /// 账户信息
-    Info { name: String },
+    /// 库内统计
+    Stats,
 }
 
 #[tokio::main]
@@ -77,55 +60,29 @@ async fn main() -> anyhow::Result<()> {
             let s = Scheduler::new(cfg)?;
             s.run().await?;
         }
-        Cmd::Account(acct) => match acct {
-            AcctCmd::Create { name, capital, watchlist } => {
-                let info = accounts::create_account(&cfg.data_dir, &name, capital)?;
-                if !watchlist.is_empty() {
-                    let db = accounts::open_account(&cfg.data_dir, &info.name)?;
-                    db.lock().unwrap().meta_set("watchlist", &watchlist)?;
-                }
-                println!("已创建账户「{}」 初始资金 {capital:.0} 库: {:?}", info.name, info.db_path);
-            }
-            AcctCmd::List => {
-                let list = accounts::list_accounts(&cfg.data_dir)?;
-                if list.is_empty() {
-                    println!("（无账户）");
-                }
-                for a in &list {
-                    println!("{}", a.name);
-                }
-            }
-            AcctCmd::Rm { name } => {
-                accounts::remove_account(&cfg.data_dir, &name)?;
-                println!("已删除账户「{name}」");
-            }
-            AcctCmd::Info { name } => {
-                let acct = accounts::open_account(&cfg.data_dir, &name)?;
-                let db = acct.lock().unwrap();
-                let a = db.get_or_init_account(cfg.initial_capital)?;
-                let positions = db.positions()?;
-                println!("账户「{name}」");
-                println!("  现金 {:.2}  初始 {:.2}", a.cash, a.initial_capital);
-                println!("  持仓 {} 只", positions.len());
-                for p in &positions {
-                    println!("    {} {} ×{} 成本 {:.3}", p.thscode, p.name, p.quantity, p.avg_cost);
-                }
-            }
-        },
-        Cmd::Decide { account } => {
-            let market = open_market_shared(std::path::Path::new(&cfg.data_dir).join("market.duckdb"))?;
-            let acct = accounts::open_account(&cfg.data_dir, &account)?;
-            let ctx = scheduler::build_decision_engine(&cfg, market, acct);
-            let result = ctx.decide(5).await?;
-            println!("状态: {}  备注: {}", result.status, result.note);
-            for i in &result.intents {
-                println!("  {} {} {}股", i.side.as_str(), i.thscode, i.quantity);
-            }
+        Cmd::Init { dump_dir } => {
+            let market = open_market_shared(PathBuf::from(&cfg.data_dir).join("market.duckdb"))?;
+            let c = Collector::new(hithink_sdk::Client::from_env()?, market);
+            let n = c.sync_tickers().await?;
+            println!("代码表: {n} 只标的");
+            let days = c.client.trading_days().await?;
+            c.upsert_trading_days(&days).await?;
+            println!("交易日历: {} 个交易日", days.item.len());
+            c.sync_daily_bars(&dump_dir, &days).await?;
+            let n = c.import_adjustment_factors(&dump_dir).await?;
+            println!("复权事件: {n} 行");
+            println!("建库完成");
+        }
+        Cmd::Stats => {
+            let market = open_market_shared(PathBuf::from(&cfg.data_dir).join("market.duckdb"))?;
+            let s = market.lock().unwrap().stats()?;
+            println!("代码表:     {}", s.tickers);
+            println!("交易日历:   {}", s.trading_days);
+            println!("日 K:       {}", s.daily_bars);
+            println!("复权事件:   {}", s.adjustment_events);
+            println!("快照:       {}", s.snapshots);
+            println!("最新日K:    {}", s.last_bar_date.as_deref().unwrap_or("-"));
         }
     }
     Ok(())
 }
-
-// 供 Decide 命令复用账户信息
-#[allow(dead_code)]
-fn _account_info(_list: &[AccountInfo]) {}
