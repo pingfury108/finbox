@@ -160,6 +160,24 @@ impl Client {
         ];
         self.get("/api/a-share-index/prices/historical", &query).await
     }
+
+    /// 指数行情快照（盘中实时）。`thscodes` 逗号分隔指数代码列表（必填）。
+    /// 返回字段与个股快照一致：last_price / open_price / high_price / low_price / volume 等。
+    pub async fn index_price_snapshot(&self, thscodes: &[&str]) -> Result<SnapshotData> {
+        let query = vec![("thscodes", thscodes.join(","))];
+        self.get("/api/a-share-index/prices/snapshot", &query).await
+    }
+
+    /// 同花顺指数列表。`tag`: `cn_concept`（概念）/ `region`（区域）/ `tszs`（特色）/ `industry`（行业）。
+    pub async fn ths_index_list(&self, tag: Option<&str>) -> Result<serde_json::Value> {
+        let q: Vec<(&str, String)> = tag.map(|t| vec![("tag", t.to_string())]).unwrap_or_default();
+        self.get("/api/a-share-index/catalog/ths-index-list", &q).await
+    }
+
+    /// 同花顺指数/标准指数成分股清单。
+    pub async fn ths_index_constituents(&self, thscode: &str) -> Result<serde_json::Value> {
+        self.get("/api/a-share-index/constituents/ths-stock-list", &[("thscode", thscode.to_string())]).await
+    }
 }
 
 #[cfg(test)]

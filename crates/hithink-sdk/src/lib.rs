@@ -28,9 +28,11 @@ pub use client::Client;
 pub use error::{Error, Result};
 
 pub use api::calendar::{TradingDay, TradingDaysData};
+pub use api::fund::FundType;
 pub use api::market_dumps::{DownloadUrl, DumpKind};
 pub use api::meta::{TickerData, TickerItem};
 pub use api::prices::{AdjustmentFactorItem, AdjustmentFactorsData, HistoricalData, PriceBarItem, PriceSnapshotItem, SnapshotData};
+pub use api::special::PoolQuery;
 pub use api::valuations::{ValuationData, ValuationItem};
 
 /// 复权方式。

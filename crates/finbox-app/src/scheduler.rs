@@ -121,6 +121,10 @@ impl Scheduler {
                     if min - self.last_collect >= self.cfg.collect_interval_seconds as i64 / 60 {
                         self.refresh_collector_key()?;
                         let n = self.collector.collect_market_snapshot().await?;
+                        // 指数快照一并采集（盘中实时）
+                        if let Err(e) = self.collector.collect_index_snapshot().await {
+                            log::warn!("[采集][盘中] 指数快照失败: {e}");
+                        }
                         log::info!("[采集][盘中] 快照 {n} 只");
                         self.last_collect = min;
                     }

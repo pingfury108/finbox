@@ -166,9 +166,36 @@ impl Db {
         Ok(v)
     }
 
+    /// 某标的今日行情快照（盘中实时）。返回 (最新价, 今开, 今日最高, 今日最低, 今日累计量)。
+    /// 盘中未采集返回 None。
+    pub fn today_snapshot(&self, thscode: &str) -> Result<Option<(f64, f64, f64, f64, f64)>> {
+        let start_ms = chrono::Local::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .unwrap()
+            .timestamp_millis();
+        let mut stmt = self.conn.prepare(
+            "SELECT last_price, open_price, high_price, low_price, volume FROM snapshots
+             WHERE thscode = ? AND ts_ms >= ?
+             ORDER BY ts_ms DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query(duckdb::params![thscode, start_ms])?;
+        match rows.next()? {
+            Some(r) => Ok(Some((
+                r.get::<_, f64>(0)?,
+                r.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
+                r.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
+                r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+                r.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
+            ))),
+            None => Ok(None),
+        }
+    }
+
     /// 最新快照价。无快照返回 `Ok(None)`。
-    pub fn latest_snapshot_price(&self, thscode: &str) -> Result<Option<f64>> {
-        let v = self.conn.query_row(
+    pub fn latest_snapshot_price(&self, thscode: &str) -> Result<Option<f64>> {        let v = self.conn.query_row(
             "SELECT (SELECT last_price FROM snapshots WHERE thscode = ?
                      ORDER BY ts_ms DESC LIMIT 1)",
             duckdb::params![thscode],

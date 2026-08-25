@@ -25,7 +25,7 @@ async fn price_snapshot_batch() {
     let c = client().await;
     let data = c.price_snapshot(Some(&["600519.SH", "000001.SZ"]), None, None).await.unwrap();
     assert_eq!(data.item.len(), 2);
-    assert!(data.item[0].last_price > 0.0);
+    assert!(data.item[0].last_price.unwrap_or(0.0) > 0.0);
 }
 
 #[tokio::test]

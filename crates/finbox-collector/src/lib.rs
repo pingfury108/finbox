@@ -155,6 +155,33 @@ impl Collector {
         Ok(total)
     }
 
+    /// 采集一次几大 A 股指数行情快照（盘中实时），与个股共写 snapshots 表。
+    pub async fn collect_index_snapshot(&self) -> Result<usize> {
+        const CODES: &[&str] = &["000001.SH", "399001.SZ", "399006.SZ", "000300.SH", "000905.SH"];
+        let page = self.client.index_price_snapshot(CODES).await?;
+        let ts_ms = page.timestamp.unwrap_or_else(now_ms);
+        let rows: Vec<SnapshotRow> = page
+            .item
+            .into_iter()
+            .map(|s| SnapshotRow {
+                thscode: s.thscode,
+                last_price: s.last_price.unwrap_or(0.0),
+                price_change: s.price_change.unwrap_or(0.0),
+                price_change_ratio_pct: s.price_change_ratio_pct.unwrap_or(0.0),
+                open_price: s.open_price.unwrap_or(0.0),
+                high_price: s.high_price.unwrap_or(0.0),
+                low_price: s.low_price.unwrap_or(0.0),
+                prev_price: s.prev_price.unwrap_or(0.0),
+                volume: s.volume.unwrap_or(0.0),
+                turnover: s.turnover.unwrap_or(0.0),
+            })
+            .collect();
+        let n = rows.len();
+        self.db.lock().unwrap().insert_snapshots(ts_ms, &rows)?;
+        info!("[数据] 指数快照采集完成: {n} 只");
+        Ok(n)
+    }
+
     /// 采集一次全市场行情快照（分页），返回标的数量。
     pub async fn collect_market_snapshot(&self) -> Result<usize> {
         let mut ts_ms: Option<i64> = None;

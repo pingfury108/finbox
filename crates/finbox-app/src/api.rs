@@ -106,6 +106,25 @@ pub async fn kline(
             ma60: ma(60),
         });
     }
+    // 盘中：用最新快照补今日实时走势（覆盖/追加最后一根）
+    if let Some((price, open, high, low, vol)) = m.today_snapshot(&thscode).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)? {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        if let Some(last) = points.last_mut() {
+            if last.date == today {
+                // 同日：覆盖（最新价、今日高低、累计量）
+                last.ohlc = vec![open, price, low, high];
+                last.volume = vol;
+            } else {
+                // 新一天：追加（用快照数据）
+                points.push(KlinePoint {
+                    date: today,
+                    ohlc: vec![open, price, low, high],
+                    volume: vol,
+                    ma5: 0.0, ma10: 0.0, ma20: 0.0, ma60: 0.0,
+                });
+            }
+        }
+    }
     Ok(Json(KlineResponse { thscode, name, points }))
 }
 
