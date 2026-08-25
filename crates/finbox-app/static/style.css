@@ -289,6 +289,24 @@ a:hover { text-decoration: underline; }
   user-select: none;
 }
 .dec-toggle:hover { color: var(--accent); }
+.dec-reviews { margin-top: 8px; }
+.review-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 4px;
+  font-size: 12px; font-weight: 600; margin-right: 6px;
+  background: var(--panel); border: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+.dec-trade-line { padding: 5px 0; font-size: 13px; border-bottom: 1px dashed var(--border); }
+.dec-trade-line:last-child { border-bottom: none; }
+.pos-row:hover td { background: var(--panel2); }
+
+/* 今日事件条 */
+.today-events { display: flex; gap: 14px; margin-bottom: 16px; font-size: 13px; flex-wrap: wrap; }
+.today-events:empty { display: none; }
+.today-events .ev { color: var(--muted); background: var(--panel); border: 1px solid var(--border); padding: 6px 14px; border-radius: 16px; }
+.today-events .ev b { color: var(--text); }
+.today-events .ev-ok b { color: var(--up); }
+.today-events .ev-warn b { color: var(--accent2); }
 
 /* 风控状态条 */
 .risk-row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }

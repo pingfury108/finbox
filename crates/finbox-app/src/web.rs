@@ -91,6 +91,8 @@ pub fn router(state: WebState) -> Router {
         .route("/api/account/{name}/positions", get(api::positions))
         .route("/api/account/{name}/trades", get(api::trades))
         .route("/api/account/{name}/decisions", get(api::decisions))
+        .route("/api/account/{name}/decision/{id}/trades", get(api::decision_trades))
+        .route("/api/accounts/equity-all", get(api::accounts_equity_all))
         .route("/api/account/{name}", axum::routing::delete(api::delete_account))
         // 静态资源（编译期嵌入）
         .route("/static/{file}", get(static_file))
@@ -150,10 +152,15 @@ fn layout(title: &str, active: &str, body: &str) -> Html<String> {
 // ---- 模拟主页：账户列表（驾驶舱） ----
 async fn home_page() -> impl IntoResponse {
     let body = r#"<div class="overview-cards" id="overview-cards"></div>
+<div class="today-events" id="today-events"></div>
 <div class="panel">
   <div class="panel-head"><h2>模拟账户</h2><a class="btn-new" href="/accounts/new">+ 新建账户</a></div>
   <div class="acct-grid" id="acct-grid"></div>
   <div class="empty" id="acct-empty" style="display:none">还没有账户，点击右上角「+ 新建账户」开始</div>
+</div>
+<div class="panel" id="compare-panel" style="display:none">
+  <h2>账户收益对比</h2>
+  <div id="compare-chart" class="chart"></div>
 </div>
 <div class="panel">
   <h2>今日决策动态</h2>

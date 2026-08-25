@@ -16,6 +16,8 @@ pub struct RecentTrade {
     pub amount: f64,
     pub fee: f64,
     pub ts_ms: i64,
+    /// 关联的决策日志 id（None 表示非 AI 决策触发，如风控）
+    pub decision_id: Option<i64>,
 }
 
 impl Db {
@@ -257,6 +259,7 @@ impl Db {
                 amount: r.get(5)?,
                 fee: r.get(6)?,
                 ts_ms: r.get(7)?,
+                decision_id: Some(decision_id),
             });
         }
         Ok(out)
@@ -265,7 +268,7 @@ impl Db {
     /// 最近 N 条成交流水（时间倒序）。
     pub fn recent_trades(&self, limit: u32) -> Result<Vec<RecentTrade>> {
         let mut stmt = self.conn.prepare(
-            "SELECT thscode, name, side, price, quantity, amount, fee, ts_ms
+            "SELECT thscode, name, side, price, quantity, amount, fee, ts_ms, decision_id
              FROM trades ORDER BY ts_ms DESC LIMIT ?",
         )?;
         let mut rows = stmt.query(duckdb::params![limit as i64])?;
@@ -281,6 +284,7 @@ impl Db {
                 amount: r.get(5)?,
                 fee: r.get(6)?,
                 ts_ms: r.get(7)?,
+                decision_id: r.get(8)?,
             });
         }
         Ok(out)

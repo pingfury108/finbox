@@ -103,6 +103,24 @@ impl Db {
         Ok(out)
     }
 
+    /// 某条决策的全部复盘结果（D+1/D+5/D+10）。
+    pub fn reviews_for_decision(&self, decision_id: i64) -> Result<Vec<ReviewRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT decision_id, days_after, summary, pnl FROM reviews WHERE decision_id = ? ORDER BY days_after",
+        )?;
+        let mut rows = stmt.query(duckdb::params![decision_id])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push(ReviewRow {
+                decision_id: r.get(0)?,
+                days_after: r.get::<_, i64>(1)? as u32,
+                summary: r.get(2)?,
+                pnl: r.get(3)?,
+            });
+        }
+        Ok(out)
+    }
+
     /// 某个决策是否已复盘过（避免重复）。
     pub fn review_exists(&self, decision_id: i64, days_after: u32) -> Result<bool> {
         let v: i64 = self.conn.query_row(

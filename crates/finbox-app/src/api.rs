@@ -430,6 +430,8 @@ pub struct TradeRow {
     pub price: f64,
     pub amount: f64,
     pub fee: f64,
+    /// 关联的 AI 决策 id（None = 风控触发）
+    pub decision_id: Option<i64>,
 }
 
 /// 账户成交记录（最近 N 条）。
@@ -449,12 +451,14 @@ pub async fn trades(
         price: t.price,
         amount: t.amount,
         fee: t.fee,
+        decision_id: t.decision_id,
     }).collect()))
 }
 
 /// 决策行。
 #[derive(Serialize)]
 pub struct DecisionRow {
+    pub id: i64,
     pub ts_ms: i64,
     pub model: String,
     pub status: String,
@@ -462,6 +466,15 @@ pub struct DecisionRow {
     pub raw_response: String,
     /// 解析后的动作 JSON（buy/sell/hold 列表）
     pub actions: String,
+    /// 复盘验证结果 [{days_after, pnl}]
+    pub reviews: Vec<ReviewBrief>,
+}
+
+/// 复盘结果摘要。
+#[derive(Serialize)]
+pub struct ReviewBrief {
+    pub days_after: u32,
+    pub pnl: f64,
 }
 
 /// 账户 AI 决策记录。
@@ -472,14 +485,62 @@ pub async fn decisions(
     let acct = accounts::open_account(&st.cfg.data_dir, &name).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
     let db = acct.lock().unwrap();
     let rows = db.recent_decision_logs(50).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
-    Ok(Json(rows.into_iter().map(|d| DecisionRow {
-        ts_ms: d.ts_ms,
-        model: d.model,
-        status: d.status,
-        note: d.note,
-        raw_response: d.raw_response,
-        actions: d.actions,
+    Ok(Json(rows.into_iter().map(|d| {
+        let reviews = db.reviews_for_decision(d.id).unwrap_or_default()
+            .into_iter().map(|r| ReviewBrief { days_after: r.days_after, pnl: r.pnl }).collect();
+        DecisionRow {
+            id: d.id,
+            ts_ms: d.ts_ms,
+            model: d.model,
+            status: d.status,
+            note: d.note,
+            raw_response: d.raw_response,
+            actions: d.actions,
+            reviews,
+        }
     }).collect()))
+}
+
+/// 某条决策关联的成交记录。
+pub async fn decision_trades(
+    State(st): State<WebState>,
+    Path((name, id)): Path<(String, i64)>,
+) -> Result<Json<Vec<TradeRow>>, axum::http::StatusCode> {
+    let acct = accounts::open_account(&st.cfg.data_dir, &name).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+    let db = acct.lock().unwrap();
+    let rows = db.trades_for_decision(id).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+    Ok(Json(rows.into_iter().map(|t| TradeRow {
+        ts_ms: t.ts_ms,
+        thscode: t.thscode,
+        name: t.name,
+        side: t.side.as_str().into(),
+        quantity: t.quantity,
+        price: t.price,
+        amount: t.amount,
+        fee: t.fee,
+        decision_id: t.decision_id,
+    }).collect()))
+}
+
+/// 全部账户的收益曲线（归一化为收益率%，多账户对比用）。
+pub async fn accounts_equity_all(State(st): State<WebState>) -> Json<Vec<serde_json::Value>> {
+    let list = accounts::list_accounts(&st.cfg.data_dir).unwrap_or_default();
+    let mut out = Vec::new();
+    for a in &list {
+        if let Ok(acct) = accounts::open_account(&st.cfg.data_dir, &a.name) {
+            let db = acct.lock().unwrap();
+            let snaps = db.account_snapshots().unwrap_or_default();
+            let initial = db.get_or_init_account(st.cfg.initial_capital).map(|x| x.initial_capital).unwrap_or(0.0);
+            if initial > 0.0 && !snaps.is_empty() {
+                let pts: Vec<serde_json::Value> = snaps.iter().map(|s| serde_json::json!({
+                    "ts": s.ts_ms,
+                    "pct": (s.total_asset / initial - 1.0) * 100.0,
+                })).collect();
+                out.push(serde_json::json!({ "name": a.name, "points": pts }));
+            }
+        }
+    }
+    Json(out)
 }
 
 fn fmt_date(ms: i64) -> String {

@@ -133,6 +133,9 @@
 
     // 今日决策动态
     renderDecisionFeed();
+    // 多账户对比曲线 + 今日事件
+    renderCompareChart();
+    renderTodayEvents();
 
     // 盘中自动刷新（60s）
     if (!window._homeTimer) {
@@ -140,6 +143,51 @@
         if (document.getElementById('acct-grid')) { renderHome(); } else { clearInterval(window._homeTimer); window._homeTimer = null; }
       }, 60000);
     }
+  }
+
+  // 多账户收益对比曲线（归一化收益率%）
+  async function renderCompareChart() {
+    const panel = document.getElementById('compare-panel');
+    if (!panel) return;
+    let data;
+    try { data = await get('/api/accounts/equity-all'); } catch (e) { return; }
+    const valid = data.filter(d => d.points && d.points.length > 1);
+    if (valid.length < 1) { panel.style.display = 'none'; return; }
+    panel.style.display = '';
+    const el = document.getElementById('compare-chart');
+    const colors = ['#58a6ff', '#f0883e', '#0ecb81', '#d2a8ff', '#f6465d'];
+    const chart = echarts.getInstanceByDom(el) || echarts.init(el);
+    chart.setOption({
+      backgroundColor: 'transparent',
+      legend: { textStyle: { color: '#8b949e' }, top: 0 },
+      grid: { left: 50, right: 20, top: 30, bottom: 30 },
+      tooltip: { trigger: 'axis', valueFormatter: v => Number(v).toFixed(2) + '%' },
+      xAxis: { type: 'category', axisLine: { lineStyle: { color: '#2a3140' } }, axisLabel: { color: '#8b949e' } },
+      yAxis: { type: 'value', scale: true, splitLine: { lineStyle: { color: '#2a3140' } }, axisLabel: { color: '#8b949e', formatter: '{value}%' } },
+      series: valid.map((d, i) => ({
+        name: d.name, type: 'line', smooth: true, showSymbol: false,
+        data: d.points.map(p => [new Date(p.ts).toLocaleDateString('zh-CN'), Number(p.pct.toFixed(3))]),
+        lineStyle: { color: colors[i % colors.length], width: 2 },
+      })),
+    });
+  }
+
+  // 今日事件统计（从决策动态聚合：成交/拒单/观望计数）
+  async function renderTodayEvents() {
+    const el = document.getElementById('today-events');
+    if (!el) return;
+    let items = [];
+    try { items = await get('/api/decisions/recent'); } catch (e) { return; }
+    const today = new Date().toLocaleDateString('zh-CN');
+    const todayItems = items.filter(d => new Date(d.ts_ms).toLocaleDateString('zh-CN') === today);
+    const executed = todayItems.filter(d => d.status === 'executed').length;
+    const rejected = todayItems.filter(d => d.status === 'rejected').length;
+    const total = todayItems.length;
+    if (total === 0) { el.innerHTML = ''; return; }
+    el.innerHTML =
+      '<span class="ev">今日决策 <b>' + total + '</b> 轮</span>' +
+      (executed ? '<span class="ev ev-ok">成交 <b>' + executed + '</b></span>' : '') +
+      (rejected ? '<span class="ev ev-warn">被拦截 <b>' + rejected + '</b></span>' : '');
   }
 
   function ovCard(label, value, vcls) {
@@ -308,11 +356,16 @@
     }
     pane.innerHTML = '<table class="tbl"><thead><tr><th>代码</th><th>名称</th><th>数量</th><th>成本</th><th>现价</th><th>浮动盈亏</th><th>盈亏率</th></tr></thead><tbody>' +
       positions.map(p =>
-        '<tr><td>' + p.thscode + '</td><td>' + esc(p.name) + '</td><td>' + p.quantity + '</td>' +
+        '<tr class="pos-row" data-code="' + p.thscode + '" title="点击查看K线"><td>' + p.thscode + '</td><td>' + esc(p.name) + '</td><td>' + p.quantity + '</td>' +
         '<td>' + fmt(p.avg_cost) + '</td><td>' + fmt(p.price) + '</td>' +
         '<td class="' + cls(p.pnl) + '">' + sign(p.pnl) + fmt(p.pnl, 0) + '</td>' +
         '<td class="' + cls(p.pnl_pct) + '">' + pct(p.pnl_pct) + '</td></tr>'
       ).join('') + '</tbody></table>';
+    // 点击持仓行 → 行情页看 K 线
+    pane.querySelectorAll('.pos-row').forEach(r => {
+      r.style.cursor = 'pointer';
+      r.addEventListener('click', () => { location.href = '/market?code=' + encodeURIComponent(r.dataset.code); });
+    });
   }
 
   async function renderTrades(name) {
@@ -360,17 +413,45 @@
         '</div>' +
         (actHtml ? '<div class="dec-acts">' + actHtml + '</div>' : '') +
         '<div class="note">' + esc(d.note) + '</div>' +
+        // 复盘验证徽章（D+1/D+5/D+10 盈亏）
+        (d.reviews && d.reviews.length ? '<div class="dec-reviews">' +
+          d.reviews.map(r => '<span class="review-badge ' + cls(r.pnl) + '">D+' + r.days_after + ' ' + sign(r.pnl) + fmt(r.pnl, 0) + '元</span>').join('') +
+          '</div>' : '') +
+        // 关联成交（点击查看）
+        (d.status === 'executed' ? '<div class="dec-toggle" data-did="' + d.id + '" data-acct="' + esc(name) + '">查看成交 ▾</div>' +
+          '<div class="raw" id="dec-trades-' + d.id + '" style="display:none"></div>' : '') +
         (d.raw_response ? '<div class="dec-toggle" data-i="' + i + '">展开原文 ▾</div>' +
           '<div class="raw" id="dec-raw-' + i + '" style="display:none">' + esc(d.raw_response.slice(0, 800)) + '</div>' : '') +
         '</div>';
     }).join('');
     // 展开/收起原文
-    pane.querySelectorAll('.dec-toggle').forEach(t => {
+    pane.querySelectorAll('.dec-toggle[data-i]').forEach(t => {
       t.addEventListener('click', () => {
         const raw = document.getElementById('dec-raw-' + t.dataset.i);
         const show = raw.style.display === 'none';
         raw.style.display = show ? '' : 'none';
         t.textContent = show ? '收起原文 ▴' : '展开原文 ▾';
+      });
+    });
+    // 查看关联成交
+    pane.querySelectorAll('.dec-toggle[data-did]').forEach(t => {
+      t.addEventListener('click', async () => {
+        const box = document.getElementById('dec-trades-' + t.dataset.did);
+        const show = box.style.display === 'none';
+        if (show && !box.dataset.loaded) {
+          box.innerHTML = '<div class="empty" style="padding:6px">加载中…</div>';
+          try {
+            const trs = await get('/api/account/' + encodeURIComponent(t.dataset.acct) + '/decision/' + t.dataset.did + '/trades');
+            box.innerHTML = trs.length ? trs.map(x =>
+              '<div class="dec-trade-line"><span class="' + (x.side === 'BUY' ? 'up' : 'down') + '">' +
+              (x.side === 'BUY' ? '买入' : '卖出') + '</span> ' + esc(x.name) + ' ' + x.quantity + '股 @ ' + fmt(x.price) +
+              ' <span class="feed-time">' + fmtTime(x.ts_ms) + '</span></div>'
+            ).join('') : '<div class="empty" style="padding:6px">无成交记录</div>';
+            box.dataset.loaded = '1';
+          } catch (e) { box.innerHTML = '<div class="empty" style="padding:6px">加载失败</div>'; }
+        }
+        box.style.display = show ? '' : 'none';
+        t.textContent = show ? '收起成交 ▴' : '查看成交 ▾';
       });
     });
   }
@@ -434,7 +515,13 @@
       }
     });
 
-    loadKline(INDEXES[0].code);
+    // URL 参数 ?code= 直接加载指定标的（持仓跳转联动）
+    const urlCode = new URLSearchParams(location.search).get('code');
+    const firstCode = urlCode || INDEXES[0].code;
+    if (urlCode) {
+      tabs && tabs.querySelectorAll('.index-tab').forEach(x => x.classList.remove('active'));
+    }
+    loadKline(firstCode);
     refreshIndexTabs();
     renderDistribution();
     renderHotList();
