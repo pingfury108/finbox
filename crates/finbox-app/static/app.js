@@ -104,7 +104,7 @@
         '<div class="acct-card-total">¥' + fmt(a.total, 0) + '</div>' +
         '<div class="acct-card-today">今日 <span class="' + cls(a.today_pnl) + '">' + sign(a.today_pnl) + fmt(a.today_pnl, 0) + '</span>' +
         ' · 收益率 <span class="' + cls(rp) + '">' + pct(rp) + '</span></div>' +
-        '<div class="acct-card-spark">' + sparklineSvg(a.sparkline, 180, 36) + '</div>' +
+        (a.sparkline && a.sparkline.length > 1 ? '<div class="acct-card-spark">' + sparklineSvg(a.sparkline, 180, 36) + '</div>' : '') +
         '<div class="acct-card-row">持仓 ' + a.position_count + ' 只 · 现金 ¥' + fmt(a.cash, 0) + '</div>' +
         '<div class="acct-card-ops">' +
           '<a class="btn-ghost" href="/account/' + encodeURIComponent(a.name) + '">查看</a>' +

@@ -28,6 +28,23 @@ pub struct WebState {
     pub market: finbox_store::SharedDb,
 }
 
+/// 管理口令校验：从 cookie `finbox_admin` 读取。未设置 ADMIN_KEY 时放行（不启用保护）。
+pub fn admin_ok(cfg: &Config, headers: &axum::http::HeaderMap) -> bool {
+    if cfg.admin_key.is_empty() {
+        return true;
+    }
+    headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .map(|cookies| {
+            cookies.split(';').any(|c| {
+                let c = c.trim();
+                c.strip_prefix("finbox_admin=").map(|k| k == cfg.admin_key).unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
 impl Clone for WebState {
     fn clone(&self) -> Self {
         Self { cfg: self.cfg.clone(), market: self.market.clone() }
@@ -55,6 +72,7 @@ pub fn router(state: WebState) -> Router {
     Router::new()
         .route("/", get(home_page))
         .route("/market", get(market_page))
+        .route("/login", get(login_page).post(login_submit))
         .route("/account/{name}", get(account_page))
         .route("/account/{name}/edit", get(account_settings_page))
         .route("/api/account/{name}/settings", post(account_settings_save))
@@ -202,8 +220,12 @@ struct AccountSettingsForm {
 async fn account_settings_save(
     State(st): State<WebState>,
     axum::extract::Path(name): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
     Form(form): Form<AccountSettingsForm>,
 ) -> Result<Redirect, StatusCode> {
+    if !admin_ok(&st.cfg, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     let acct = accounts::open_account(&st.cfg.data_dir, &name).map_err(|_| StatusCode::NOT_FOUND)?;
     let db = acct.lock().unwrap();
     db.meta_set("initial_capital", &form.initial_capital.to_string()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -246,8 +268,50 @@ async fn market_page() -> impl IntoResponse {    let body = r#"<div class="panel
     layout("行情", "market", body)
 }
 
+// ---- 登录页（管理口令） ----
+async fn login_page() -> impl IntoResponse {
+    let body = r#"<section class="panel login-panel">
+  <h2>🔒 需要管理口令</h2>
+  <p class="hint">该操作受保护。口令由部署者通过环境变量 ADMIN_KEY 或 --admin-key 配置。</p>
+  <form method=post class="form">
+    <label>管理口令 <input name=key type=password autofocus></label>
+    <button type=submit>进入</button>
+  </form>
+</section>"#;
+    layout("验证", "", body)
+}
+
+#[derive(Deserialize)]
+struct LoginForm {
+    key: String,
+}
+
+async fn login_submit(State(st): State<WebState>, Form(form): Form<LoginForm>) -> Response {
+    if !st.cfg.admin_key.is_empty() && form.key == st.cfg.admin_key {
+        // 口令正确：种 cookie（30 天），跳回主页
+        (
+            [(header::SET_COOKIE, format!("finbox_admin={}; Path=/; Max-Age=2592000; SameSite=Lax", form.key))],
+            Redirect::to("/settings"),
+        )
+            .into_response()
+    } else {
+        let body = r#"<section class="panel login-panel">
+  <h2>🔒 口令错误</h2>
+  <p class="hint" style="color:var(--up)">口令不正确，请重试。</p>
+  <form method=post class="form">
+    <label>管理口令 <input name=key type=password autofocus></label>
+    <button type=submit>进入</button>
+  </form>
+</section>"#;
+        layout("验证", "", body).into_response()
+    }
+}
+
 // ---- 设置 ----
-async fn settings_page(State(st): State<WebState>) -> impl IntoResponse {
+async fn settings_page(State(st): State<WebState>, headers: axum::http::HeaderMap) -> Response {
+    if !admin_ok(&st.cfg, &headers) {
+        return Redirect::to("/login").into_response();
+    }
     let c = &st.cfg;
     let (hk, lk) = {
         let m = st.market.lock().unwrap();
@@ -255,21 +319,28 @@ async fn settings_page(State(st): State<WebState>) -> impl IntoResponse {
         let l = m.meta_get("llm_api_key").ok().flatten().unwrap_or_else(|| c.llm_api_key.clone());
         (h, l)
     };
+    // 掩码显示 key
+    let mask = |s: &str| if s.len() > 10 { format!("{}****{}", &s[..6], &s[s.len()-4..]) } else { "****".to_string() };
+    let admin_state = if c.admin_key.is_empty() { "未启用（设 ADMIN_KEY 环境变量启用）".to_string() } else { "已启用 ●（由环境变量配置，Web 不可改）".to_string() };
     let body = format!(
-        r#"<section class="panel"><h2>设置</h2>
-        <p class="hint">配置保存后即时生效，无需重启。</p>
+        r#"<section class="panel"><h2>API 密钥</h2>
+        <p class="hint">当前: 同花顺 <code>{}</code> · AI <code>{}</code>。保存后即时生效。</p>
         <form method=post class="form">
           <label>同花顺数据 Key <input name=hithink_api_key value="{}" type=text></label>
           <label>AI Key <input name=llm_api_key value="{}" type=text></label>
           <label>AI 服务地址 <input name=llm_base_url value="{}" type=text></label>
           <label>AI 模型 <input name=llm_model value="{}" type=text></label>
+          <h2 style="margin-top:18px">参数</h2>
           <label>候选股数量 <input name=candidate_count value="{}" type=number></label>
           <label>行情刷新间隔(秒) <input name=collect_interval_seconds value="{}" type=number></label>
           <button type=submit>保存</button>
-        </form></section>"#,
-        esc(&hk), esc(&lk), esc(&c.llm_base_url), esc(&c.llm_model), c.candidate_count, c.collect_interval_seconds
+        </form></section>
+        <section class="panel"><h2>安全</h2><p class="hint">管理口令: {}</p></section>"#,
+        esc(&mask(&hk)), esc(&mask(&lk)),
+        esc(&hk), esc(&lk), esc(&c.llm_base_url), esc(&c.llm_model), c.candidate_count, c.collect_interval_seconds,
+        esc(&admin_state)
     );
-    layout("设置", "settings", &body)
+    layout("设置", "settings", &body).into_response()
 }
 
 #[derive(Deserialize)]
@@ -284,8 +355,12 @@ struct SettingsForm {
 
 async fn save_settings(
     State(st): State<WebState>,
+    headers: axum::http::HeaderMap,
     Form(form): Form<SettingsForm>,
 ) -> Result<Redirect, StatusCode> {
+    if !admin_ok(&st.cfg, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     let m = st.market.lock().unwrap();
     m.meta_set("hithink_api_key", &form.hithink_api_key).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     m.meta_set("llm_api_key", &form.llm_api_key).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -297,7 +372,10 @@ async fn save_settings(
 }
 
 // ---- 新建账户 ----
-async fn new_account_page() -> impl IntoResponse {
+async fn new_account_page(State(st): State<WebState>, headers: axum::http::HeaderMap) -> Response {
+    if !admin_ok(&st.cfg, &headers) {
+        return Redirect::to("/login").into_response();
+    }
     let body = r#"<section class="panel"><h2>新建模拟账户</h2>
     <form method=post class="form">
       <label>账户名称 <input name=name placeholder="如：稳健型"></label>
@@ -305,7 +383,7 @@ async fn new_account_page() -> impl IntoResponse {
       <label>自选池(逗号分隔代码) <input name=watchlist></label>
       <button type=submit>创建</button>
     </form></section>"#;
-    layout("新建账户", "", body)
+    layout("新建账户", "", body).into_response()
 }
 
 #[derive(Deserialize)]
@@ -317,8 +395,12 @@ struct NewAccountForm {
 
 async fn create_account(
     State(st): State<WebState>,
+    headers: axum::http::HeaderMap,
     Form(form): Form<NewAccountForm>,
 ) -> Result<Redirect, StatusCode> {
+    if !admin_ok(&st.cfg, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     let info = accounts::create_account(&st.cfg.data_dir, &form.name, form.capital)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     if !form.watchlist.is_empty() {

@@ -23,6 +23,8 @@ pub struct Config {
     pub llm_model: String,
     /// 同花顺 API Key
     pub hithink_api_key: String,
+    /// 管理口令（只从环境变量/参数读取，不设则不启用保护；Web 不可改）
+    pub admin_key: String,
 }
 
 impl Default for Config {
@@ -38,6 +40,7 @@ impl Default for Config {
             llm_api_key: String::new(),
             llm_model: "deepseek-chat".into(),
             hithink_api_key: String::new(),
+            admin_key: String::new(),
         }
     }
 }
@@ -60,6 +63,7 @@ impl Config {
             llm_api_key: env_str("LLM_API_KEY", &Self::default().llm_api_key),
             llm_model: env_str("LLM_MODEL", &Self::default().llm_model),
             hithink_api_key: env_str("HITHINK_FINANCE_API_KEY", &Self::default().hithink_api_key),
+            admin_key: env_str("ADMIN_KEY", &Self::default().admin_key),
         })
     }
 }

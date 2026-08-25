@@ -28,7 +28,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// 启动整个系统：数据采集 + 所有账户调度 + Web 界面
-    Run,
+    Run {
+        /// 管理口令（保护设置页/新建/删除账户；也可用环境变量 ADMIN_KEY）
+        #[arg(long)]
+        admin_key: Option<String>,
+    },
     /// 账户管理
     #[command(subcommand)]
     Account(AcctCmd),
@@ -65,7 +69,11 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::from_env()?;
 
     match cli.cmd {
-        Cmd::Run => {
+        Cmd::Run { admin_key } => {
+            let mut cfg = cfg;
+            if let Some(k) = admin_key {
+                cfg.admin_key = k;
+            }
             let s = Scheduler::new(cfg)?;
             s.run().await?;
         }

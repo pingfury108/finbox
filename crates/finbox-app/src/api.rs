@@ -285,7 +285,11 @@ pub async fn recent_decisions(State(st): State<WebState>) -> Json<Vec<DecisionFe
 pub async fn delete_account(
     State(st): State<WebState>,
     Path(name): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    if !crate::web::admin_ok(&st.cfg, &headers) {
+        return Err(axum::http::StatusCode::UNAUTHORIZED);
+    }
     accounts::remove_account(&st.cfg.data_dir, &name)
         .map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
     Ok(Json(serde_json::json!({ "ok": true })))

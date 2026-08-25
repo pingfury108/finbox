@@ -97,11 +97,16 @@ a:hover { text-decoration: underline; }
   background: var(--panel2); border: 1px solid var(--border);
   border-radius: 20px; padding: 5px 12px; font-size: 13px;
 }
-.acct-chip .del-btn {
-  background: none; border: none; color: var(--muted); cursor: pointer;
-  font-size: 12px; padding: 0 2px; border-radius: 4px;
+
+/* 删除按钮（危险操作，低调红色） */
+.del-btn {
+  background: none; border: none; cursor: pointer;
+  color: var(--muted); font-size: 13px; padding: 6px 12px;
+  border-radius: 6px; transition: all .15s;
 }
-.acct-chip .del-btn:hover { color: var(--up); }
+.del-btn:hover {
+  color: var(--up); background: #f6465d1a; text-decoration: none;
+}
 
 /* 模拟主页：账户卡片网格 */
 .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
