@@ -172,16 +172,21 @@
     const accts = await get('/api/accounts');
     const acct = accts.find(a => a.name === name);
     if (acct) {
+      const posPct = acct.total > 0 ? (acct.market_value / acct.total * 100) : 0;
       cards.innerHTML = [
         card('总资产', '¥' + fmt(acct.total, 0)),
+        card('今日盈亏', sign(acct.today_pnl) + fmt(acct.today_pnl, 0), cls(acct.today_pnl)),
+        card('累计收益', pct(acct.return_pct), cls(acct.return_pct)),
         card('可用现金', '¥' + fmt(acct.cash, 0)),
-        card('收益率', pct(acct.return_pct), cls(acct.return_pct)),
-        card('持仓', acct.position_count + ' 只'),
+        card('持仓市值', '¥' + fmt(acct.market_value, 0)),
+        card('仓位', fmt(posPct, 1) + '%', posPct > 60 ? 'up' : ''),
       ].join('');
     }
 
-    // 资产曲线
-    let equity = [];
+    renderRisk(name);
+
+    // 资产曲线（含基准）
+    let equity = null;
     try { equity = await get('/api/account/' + encodeURIComponent(name) + '/equity'); } catch (e) {}
     renderEquity(equity);
 
@@ -210,21 +215,68 @@
     }
   }
 
-  function renderEquity(pts) {
+  // 风控状态条
+  async function renderRisk(name) {
+    const el = document.getElementById('risk-status');
+    if (!el) return;
+    let r;
+    try { r = await get('/api/account/' + encodeURIComponent(name) + '/risk'); } catch (e) { return; }
+    let html = '<div class="risk-row">';
+    if (r.fuse_active) {
+      html += '<span class="regime risk-off">熔断中（回撤超限，暂停买入）</span>';
+    } else {
+      html += '<span class="regime neutral">风控正常</span>';
+    }
+    html += '<span class="risk-item">当前回撤 <b class="' + cls(-r.drawdown_pct) + '">' + fmt(-r.drawdown_pct, 1) + '%</b></span>';
+    html += '<span class="risk-item">仓位 <b>' + fmt(r.position_pct, 1) + '%</b></span>';
+    html += '</div>';
+    if (r.positions && r.positions.length) {
+      html += '<table class="tbl" style="margin-top:10px"><thead><tr><th>标的</th><th>现价</th><th>成本</th><th>距止损线(-5%)</th><th>距止盈线(+15%)</th></tr></thead><tbody>';
+      html += r.positions.map(p => {
+        const stopCls = p.to_stop_pct < 2 ? 'up' : '';
+        return '<tr><td>' + esc(p.name) + '</td><td>' + fmt(p.price) + '</td><td>' + fmt(p.avg_cost) + '</td>' +
+          '<td class="' + stopCls + '">' + fmt(p.to_stop_pct, 1) + '%</td>' +
+          '<td>' + fmt(p.to_profit_pct, 1) + '%</td></tr>';
+      }).join('');
+      html += '</tbody></table>';
+    } else {
+      html += '<div class="empty">空仓，无风控敞口</div>';
+    }
+    el.innerHTML = html;
+  }
+
+  function renderEquity(data) {
     const el = document.getElementById('equity-chart');
     if (!el) return;
+    const pts = (data && data.points) || [];
+    const bench = (data && data.benchmark) || [];
     if (pts.length === 0) {
       el.innerHTML = '<div class="empty">暂无数据（首个交易日收盘后生成）</div>';
       return;
     }
-    const chart = echarts.init(el);
+    const chart = echarts.getInstanceByDom(el) || echarts.init(el);
+    const series = [{
+      name: '账户总资产',
+      type: 'line', data: pts.map(p => [new Date(p.ts).toLocaleDateString('zh-CN'), p.total]),
+      smooth: true, showSymbol: false,
+      lineStyle: { color: '#58a6ff', width: 2 },
+      areaStyle: { color: 'rgba(88,166,255,0.12)' },
+    }];
+    if (bench.length) {
+      series.push({
+        name: '沪深300（基准）',
+        type: 'line', data: bench.map(p => [new Date(p.ts).toLocaleDateString('zh-CN'), p.total]),
+        smooth: true, showSymbol: false,
+        lineStyle: { color: '#8b949e', width: 1, type: 'dashed' },
+      });
+    }
     chart.setOption({
       backgroundColor: 'transparent',
-      grid: { left: 60, right: 20, top: 20, bottom: 30 },
+      legend: { textStyle: { color: '#8b949e' }, top: 0 },
+      grid: { left: 70, right: 20, top: 30, bottom: 30 },
       tooltip: { trigger: 'axis', valueFormatter: v => '¥' + Number(v).toLocaleString() },
       xAxis: {
         type: 'category',
-        data: pts.map(p => new Date(p.ts).toLocaleDateString('zh-CN')),
         axisLine: { lineStyle: { color: '#2a3140' } },
         axisLabel: { color: '#8b949e' },
       },
@@ -233,12 +285,7 @@
         splitLine: { lineStyle: { color: '#2a3140' } },
         axisLabel: { color: '#8b949e' },
       },
-      series: [{
-        type: 'line', data: pts.map(p => p.total),
-        smooth: true, showSymbol: false,
-        lineStyle: { color: '#58a6ff', width: 2 },
-        areaStyle: { color: 'rgba(88,166,255,0.12)' },
-      }],
+      series: series,
     });
     window.addEventListener('resize', () => chart.resize());
   }
@@ -288,13 +335,37 @@
       pane.innerHTML = '<div class="empty">暂无 AI 建议记录</div>';
       return;
     }
-    pane.innerHTML = decisions.map(d =>
-      '<div class="dec-item"><div class="meta">' + fmtTime(d.ts_ms) + ' · ' + esc(d.model) +
-      '<span class="status status-' + d.status + '">' + statusLabel(d.status) + '</span></div>' +
-      '<div class="note">' + esc(d.note) + '</div>' +
-      (d.raw_response ? '<div class="raw">' + esc(d.raw_response.slice(0, 400)) + '</div>' : '') +
-      '</div>'
-    ).join('') || '<div class="empty">暂无 AI 建议记录</div>';
+    pane.innerHTML = decisions.map((d, i) => {
+      let acts = [];
+      try { acts = JSON.parse(d.actions || '[]'); } catch (e) {}
+      const actHtml = acts.map(a => {
+        const clsMap = { buy: 'up', sell: 'down', hold: '' };
+        const labelMap = { buy: '买入', sell: '卖出', hold: '观望' };
+        return '<span class="act-badge ' + (clsMap[a.action] || '') + '">' +
+          (labelMap[a.action] || a.action) + ' ' + esc(a.symbol || '') +
+          (a.quantity ? ' ' + a.quantity + '股' : '') + '</span>';
+      }).join(' ');
+      return '<div class="dec-card">' +
+        '<div class="dec-card-head">' +
+          '<span class="feed-time">' + fmtTime(d.ts_ms) + '</span>' +
+          '<span class="status status-' + d.status + '">' + statusLabel(d.status) + '</span>' +
+          '<span class="dec-model">' + esc(d.model) + '</span>' +
+        '</div>' +
+        (actHtml ? '<div class="dec-acts">' + actHtml + '</div>' : '') +
+        '<div class="note">' + esc(d.note) + '</div>' +
+        (d.raw_response ? '<div class="dec-toggle" data-i="' + i + '">展开原文 ▾</div>' +
+          '<div class="raw" id="dec-raw-' + i + '" style="display:none">' + esc(d.raw_response.slice(0, 800)) + '</div>' : '') +
+        '</div>';
+    }).join('');
+    // 展开/收起原文
+    pane.querySelectorAll('.dec-toggle').forEach(t => {
+      t.addEventListener('click', () => {
+        const raw = document.getElementById('dec-raw-' + t.dataset.i);
+        const show = raw.style.display === 'none';
+        raw.style.display = show ? '' : 'none';
+        t.textContent = show ? '收起原文 ▴' : '展开原文 ▾';
+      });
+    });
   }
 
   // ========== 行情页（K线 + 全景）==========

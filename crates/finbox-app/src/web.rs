@@ -69,6 +69,7 @@ pub fn router(state: WebState) -> Router {
         .route("/api/market/hot", get(api::market_hot))
         .route("/api/decisions/recent", get(api::recent_decisions))
         .route("/api/account/{name}/equity", get(api::equity))
+        .route("/api/account/{name}/risk", get(api::risk_status))
         .route("/api/account/{name}/positions", get(api::positions))
         .route("/api/account/{name}/trades", get(api::trades))
         .route("/api/account/{name}/decisions", get(api::decisions))
@@ -153,7 +154,8 @@ async fn account_page(State(st): State<WebState>, axum::extract::Path(name): axu
     let body = format!(r#"<p><a href="/" class="back">← 返回模拟</a></p>
 <div class="panel-head"><h2 id="acct-title">账户「{name}」</h2>
   <a class="btn-ghost" href="/account/{name}/edit">参数设置</a></div>
-<div class="cards" id="acct-cards"></div>
+<div class="cards cards-6" id="acct-cards"></div>
+<div class="panel risk-panel"><h2>风控状态</h2><div id="risk-status"></div></div>
 <div class="panel"><h2>资产曲线</h2><div id="equity-chart" class="chart"></div></div>
 <div class="tabs" id="acct-tabs">
   <button class="tab active" data-tab="positions">持仓</button>

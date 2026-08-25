@@ -263,7 +263,34 @@ a:hover { text-decoration: underline; }
 .acct-card-spark { height: 36px; margin: 8px 0 4px; }
 .acct-card-today { font-size: 13px; margin-bottom: 4px; font-variant-numeric: tabular-nums; }
 
-/* 决策动态时间线 */
+/* 决策结构化卡片 */
+.dec-card {
+  padding: 14px; margin-bottom: 10px;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+}
+.dec-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.dec-card-head .status { margin-left: 0; }
+.dec-model { color: var(--muted); font-size: 12px; }
+.dec-acts { margin-bottom: 8px; }
+.act-badge {
+  display: inline-block; padding: 3px 10px; border-radius: 5px;
+  font-size: 12px; font-weight: 600; margin-right: 6px;
+  background: var(--panel); border: 1px solid var(--border);
+}
+.act-badge.up { color: var(--up); border-color: #f6465d55; }
+.act-badge.down { color: var(--down); border-color: #0ecb8155; }
+.dec-toggle {
+  color: var(--muted); font-size: 12px; cursor: pointer; margin-top: 6px;
+  user-select: none;
+}
+.dec-toggle:hover { color: var(--accent); }
+
+/* 风控状态条 */
+.risk-row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.risk-item { color: var(--muted); font-size: 13px; }
+.risk-item b { color: var(--text); font-variant-numeric: tabular-nums; }
+.risk-panel { border-left: 3px solid var(--accent2); }
+.cards-6 { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
 .feed { max-height: 420px; overflow-y: auto; }
 .feed-item {
   display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border);

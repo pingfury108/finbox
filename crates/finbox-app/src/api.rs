@@ -295,11 +295,84 @@ pub async fn delete_account(
 pub async fn equity(
     State(st): State<WebState>,
     Path(name): Path<String>,
-) -> Result<Json<Vec<EquityPoint>>, axum::http::StatusCode> {
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let acct = accounts::open_account(&st.cfg.data_dir, &name).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
-    let db = acct.lock().unwrap();
-    let snaps = db.account_snapshots().map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
-    Ok(Json(snaps.into_iter().map(|s| EquityPoint { ts: s.ts_ms, total: s.total_asset }).collect()))
+    let (snaps, initial) = {
+        let db = acct.lock().unwrap();
+        let snaps = db.account_snapshots().map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+        let initial = db.get_or_init_account(st.cfg.initial_capital).map(|a| a.initial_capital).unwrap_or(0.0);
+        (snaps, initial)
+    };
+    let points: Vec<EquityPoint> = snaps.iter().map(|s| EquityPoint { ts: s.ts_ms, total: s.total_asset }).collect();
+    // 基准：沪深300 同区间净值化（首个快照日=初始资金）
+    let mut benchmark: Vec<EquityPoint> = Vec::new();
+    if let (Some(first), true) = (snaps.first(), initial > 0.0) {
+        let m = st.market.lock().unwrap();
+        if let Ok(bars) = m.recent_bars("000300.SH", 400) {
+            let base = bars.iter().find(|b| b.date_ms <= first.ts_ms).map(|b| b.close)
+                .or_else(|| bars.first().map(|b| b.close));
+            if let Some(base) = base.filter(|b| *b > 0.0) {
+                for b in &bars {
+                    if b.date_ms >= first.ts_ms - 86_400_000 {
+                        benchmark.push(EquityPoint { ts: b.date_ms, total: initial * b.close / base });
+                    }
+                }
+            }
+        }
+    }
+    Ok(Json(serde_json::json!({ "points": points, "benchmark": benchmark })))
+}
+
+/// 持仓风控状态行。
+#[derive(Serialize)]
+pub struct RiskRow {
+    pub thscode: String,
+    pub name: String,
+    pub price: f64,
+    pub avg_cost: f64,
+    /// 距止损线（-5%）的百分比距离，如 3.2 表示现价离止损线还有 3.2%
+    pub to_stop_pct: f64,
+    /// 距止盈线（+15%）的百分比距离
+    pub to_profit_pct: f64,
+}
+
+/// 账户风控状态：熔断 + 持仓止损/止盈距离 + 仓位。
+pub async fn risk_status(
+    State(st): State<WebState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let acct = accounts::open_account(&st.cfg.data_dir, &name).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+    let (positions, cash, fuse_until, peak) = {
+        let db = acct.lock().unwrap();
+        let ac = db.get_or_init_account(st.cfg.initial_capital).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+        let fuse = db.meta_get("fuse_until_ms").ok().flatten().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+        let peak = db.meta_get("peak_asset").ok().flatten().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        (db.positions().unwrap_or_default(), ac.cash, fuse, peak)
+    };
+    let mut rows = Vec::new();
+    let mut mv = 0.0;
+    {
+        let m = st.market.lock().unwrap();
+        for p in &positions {
+            let price = m.latest_snapshot_price(&p.thscode).ok().flatten().unwrap_or(p.avg_cost);
+            mv += price * p.quantity as f64;
+            let to_stop = if p.avg_cost > 0.0 { (price / (p.avg_cost * 0.95) - 1.0) * 100.0 } else { 0.0 };
+            let to_profit = if p.avg_cost > 0.0 { (price / (p.avg_cost * 1.15) - 1.0) * 100.0 } else { 0.0 };
+            rows.push(RiskRow { thscode: p.thscode.clone(), name: p.name.clone(), price, avg_cost: p.avg_cost, to_stop_pct: to_stop, to_profit_pct: to_profit });
+        }
+    }
+    let total = cash + mv;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let drawdown = if peak > 0.0 { (peak - total) / peak * 100.0 } else { 0.0 };
+    Ok(Json(serde_json::json!({
+        "fuse_active": fuse_until > now_ms,
+        "fuse_until_ms": fuse_until,
+        "peak": peak,
+        "total": total,
+        "drawdown_pct": drawdown,
+        "position_pct": if total > 0.0 { mv / total * 100.0 } else { 0.0 },
+        "positions": rows,
+    })))
 }
 
 /// 持仓行（含现价与浮动盈亏，价格读行情库）。
@@ -383,6 +456,8 @@ pub struct DecisionRow {
     pub status: String,
     pub note: String,
     pub raw_response: String,
+    /// 解析后的动作 JSON（buy/sell/hold 列表）
+    pub actions: String,
 }
 
 /// 账户 AI 决策记录。
@@ -399,6 +474,7 @@ pub async fn decisions(
         status: d.status,
         note: d.note,
         raw_response: d.raw_response,
+        actions: d.actions,
     }).collect()))
 }
 
