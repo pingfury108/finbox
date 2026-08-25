@@ -234,6 +234,31 @@ pub async fn market_overview(State(st): State<WebState>) -> Json<MarketOverview>
     Json(MarketOverview { indexes, up, total, regime, ts_ms: latest_ts })
 }
 
+/// 市场涨跌分布（分桶统计）。
+pub async fn market_distribution(State(st): State<WebState>) -> Json<Vec<(String, u32)>> {
+    let m = st.market.lock().unwrap();
+    Json(m.market_distribution().unwrap_or_default())
+}
+
+/// 同花顺热股榜 TOP20（实时调上游 API；key 从库 meta 读，热生效）。
+pub async fn market_hot(State(st): State<WebState>) -> Json<serde_json::Value> {
+    let key = {
+        let m = st.market.lock().unwrap();
+        m.meta_get("hithink_api_key").ok().flatten().unwrap_or_default()
+    };
+    if key.is_empty() {
+        return Json(serde_json::json!({ "item": [] }));
+    }
+    let client = match hithink_sdk::Client::new(key) {
+        Ok(c) => c,
+        Err(_) => return Json(serde_json::json!({ "item": [] })),
+    };
+    match client.hot_stock_list(Some("day")).await {
+        Ok(v) => Json(v),
+        Err(_) => Json(serde_json::json!({ "item": [] })),
+    }
+}
+
 /// 全局决策时间线（合并所有账户，按时间倒序，limit 20）。
 pub async fn recent_decisions(State(st): State<WebState>) -> Json<Vec<DecisionFeedItem>> {
     let list = accounts::list_accounts(&st.cfg.data_dir).unwrap_or_default();

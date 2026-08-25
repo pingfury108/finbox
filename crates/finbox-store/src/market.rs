@@ -204,6 +204,32 @@ impl Db {
         Ok((up as u32, total as u32))
     }
 
+    /// 涨跌分布（最新快照分桶）：涨停(>=9.8%) / >5% / 0~5% / 平(±0.1%) / -5~0% / <-5% / 跌停(<=-9.8%)。
+    pub fn market_distribution(&self) -> Result<Vec<(String, u32)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT bucket, COUNT(*) FROM (
+                SELECT CASE
+                    WHEN s.price_change_ratio_pct >= 9.8 THEN '涨停'
+                    WHEN s.price_change_ratio_pct >= 5 THEN '>5%'
+                    WHEN s.price_change_ratio_pct > 0.1 THEN '0~5%'
+                    WHEN s.price_change_ratio_pct >= -0.1 THEN '平'
+                    WHEN s.price_change_ratio_pct > -5 THEN '-5~0%'
+                    WHEN s.price_change_ratio_pct > -9.8 THEN '<-5%'
+                    ELSE '跌停' END AS bucket
+                FROM snapshots s
+                JOIN (SELECT thscode, MAX(ts_ms) AS m FROM snapshots GROUP BY thscode) t
+                  ON s.thscode = t.thscode AND s.ts_ms = t.m
+                WHERE s.last_price > 0
+             ) GROUP BY bucket",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u32));
+        }
+        Ok(out)
+    }
+
     /// 全市场量比，单条 SQL（窗口函数），避免逐只查询。
     pub fn market_volume_ratios(&self) -> Result<Vec<VolumeRatio>> {
         let mut stmt = self.conn.prepare(

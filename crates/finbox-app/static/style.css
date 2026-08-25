@@ -170,6 +170,27 @@ a:hover { text-decoration: underline; }
 .kline-head { display: flex; align-items: baseline; gap: 16px; }
 .kline-head .quote { color: var(--accent2); font-weight: 600; }
 
+/* 行情页双栏布局 */
+.market-grid { display: grid; grid-template-columns: 1fr 300px; gap: 18px; align-items: start; }
+@media (max-width: 960px) { .market-grid { grid-template-columns: 1fr; } }
+.market-side { display: flex; flex-direction: column; }
+
+/* 热股榜 */
+.hot-list .hot-item {
+  display: flex; align-items: center; gap: 8px; padding: 7px 0;
+  border-bottom: 1px solid var(--border); font-size: 13px; cursor: pointer;
+}
+.hot-list .hot-item:hover { background: var(--panel2); }
+.hot-list .hot-item:last-child { border-bottom: none; }
+.hot-list .hot-rank {
+  width: 20px; height: 20px; border-radius: 4px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; background: var(--panel2); color: var(--muted);
+}
+.hot-list .hot-rank.top { background: var(--up); color: #fff; }
+.hot-list .hot-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hot-list .hot-pct { font-variant-numeric: tabular-nums; font-weight: 600; }
+
 /* 表单 */
 .form label { display: block; margin-bottom: 14px; color: var(--muted); font-size: 13px; }
 .form input {

@@ -65,6 +65,8 @@ pub fn router(state: WebState) -> Router {
         .route("/api/kline/{code}", get(api::kline))
         .route("/api/accounts", get(api::accounts))
         .route("/api/market/overview", get(api::market_overview))
+        .route("/api/market/distribution", get(api::market_distribution))
+        .route("/api/market/hot", get(api::market_hot))
         .route("/api/decisions/recent", get(api::recent_decisions))
         .route("/api/account/{name}/equity", get(api::equity))
         .route("/api/account/{name}/positions", get(api::positions))
@@ -212,7 +214,7 @@ async fn account_settings_save(
 }
 
 
-// ---- 行情页（K线）----
+// ---- 行情页（K线 + 市场全景）----
 async fn market_page() -> impl IntoResponse {    let body = r#"<div class="panel">
   <div class="index-tabs" id="index-tabs"></div>
   <div class="searchbar" style="margin-top:12px">
@@ -220,13 +222,25 @@ async fn market_page() -> impl IntoResponse {    let body = r#"<div class="panel
     <div id="sym-suggest" class="suggest"></div>
   </div>
 </div>
-<section class="panel">
-  <div class="kline-head">
-    <h2 id="kline-name">加载中…</h2>
-    <span id="kline-quote" class="quote"></span>
-  </div>
-  <div id="kline-chart" class="chart chart-lg"></div>
-</section>"#;
+<div class="market-grid">
+  <section class="panel">
+    <div class="kline-head">
+      <h2 id="kline-name">加载中…</h2>
+      <span id="kline-quote" class="quote"></span>
+    </div>
+    <div id="kline-chart" class="chart chart-lg"></div>
+  </section>
+  <aside class="market-side">
+    <div class="panel">
+      <h2>涨跌分布</h2>
+      <div id="dist-chart" class="chart" style="height:180px"></div>
+    </div>
+    <div class="panel">
+      <h2>热股榜 TOP10</h2>
+      <div id="hot-list" class="hot-list"><div class="empty">加载中…</div></div>
+    </div>
+  </aside>
+</div>"#;
     layout("行情", "market", body)
 }
 

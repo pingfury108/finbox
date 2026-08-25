@@ -297,7 +297,7 @@
     ).join('') || '<div class="empty">暂无 AI 建议记录</div>';
   }
 
-  // ========== 行情页（K线）==========
+  // ========== 行情页（K线 + 全景）==========
   const INDEXES = [
     { code: '000001.SH', name: '上证指数' },
     { code: '399001.SZ', name: '深证成指' },
@@ -306,16 +306,16 @@
     { code: '000905.SH', name: '中证500' },
   ];
 
+  let curKlineCode = INDEXES[0].code;
+  let klineTimer = null;
+
   function initMarket() {
     const input = document.getElementById('sym-search');
-    const suggest = document.getElementById('sym-suggest');
     if (!input) return;
+    const suggest = document.getElementById('sym-suggest');
 
     const tabs = document.getElementById('index-tabs');
     if (tabs) {
-      tabs.innerHTML = INDEXES.map((ix, i) =>
-        '<button class="index-tab' + (i === 0 ? ' active' : '') + '" data-code="' + ix.code + '">' + ix.name + '</button>'
-      ).join('');
       tabs.addEventListener('click', e => {
         const b = e.target.closest('.index-tab');
         if (!b) return;
@@ -357,15 +357,95 @@
     });
 
     loadKline(INDEXES[0].code);
+    refreshIndexTabs();
+    renderDistribution();
+    renderHotList();
+    // 60s 自动刷新：指数条/分布/热榜/当前K线
+    setInterval(() => {
+      if (!document.getElementById('sym-search')) return;
+      refreshIndexTabs();
+      renderDistribution();
+      loadKline(curKlineCode, true);
+    }, 60000);
   }
 
-  async function loadKline(code) {
+  // 指数切换条（带实时价）
+  async function refreshIndexTabs() {
+    const tabs = document.getElementById('index-tabs');
+    if (!tabs) return;
+    let ov;
+    try { ov = await get('/api/market/overview'); } catch (e) { return; }
+    const active = tabs.querySelector('.index-tab.active');
+    const activeCode = active ? active.dataset.code : INDEXES[0].code;
+    tabs.innerHTML = INDEXES.map(ix => {
+      const q = ov.indexes.find(i => i.thscode === ix.code);
+      const price = q ? fmt(q.price) : '-';
+      const pctTxt = q ? pct(q.pct) : '';
+      const c = q ? cls(q.pct) : '';
+      return '<button class="index-tab' + (ix.code === activeCode ? ' active' : '') + '" data-code="' + ix.code + '">' +
+        ix.name + ' <span class="' + c + '">' + price + ' ' + pctTxt + '</span></button>';
+    }).join('');
+  }
+
+  // 涨跌分布柱状图
+  async function renderDistribution() {
+    const el = document.getElementById('dist-chart');
+    if (!el) return;
+    let dist;
+    try { dist = await get('/api/market/distribution'); } catch (e) { return; }
+    const order = ['涨停', '>5%', '0~5%', '平', '-5~0%', '<-5%', '跌停'];
+    const map = {};
+    dist.forEach(d => { map[d[0]] = d[1]; });
+    const colors = { '涨停': '#f6465d', '>5%': '#ff7a8c', '0~5%': '#ff9eaa', '平': '#8b949e', '-5~0%': '#4ade9e', '<-5%': '#22d68a', '跌停': '#0ecb81' };
+    const chart = echarts.getInstanceByDom(el) || echarts.init(el);
+    chart.setOption({
+      backgroundColor: 'transparent',
+      grid: { left: 8, right: 8, top: 10, bottom: 20 },
+      xAxis: { type: 'category', data: order, axisLabel: { color: '#8b949e', fontSize: 10, interval: 0 },
+        axisLine: { lineStyle: { color: '#2a3140' } } },
+      yAxis: { type: 'value', show: false },
+      tooltip: { trigger: 'axis' },
+      series: [{
+        type: 'bar', barWidth: '60%',
+        data: order.map(k => ({ value: map[k] || 0, itemStyle: { color: colors[k], borderRadius: [3, 3, 0, 0] } })),
+        label: { show: true, position: 'top', color: '#8b949e', fontSize: 10 },
+      }],
+    });
+  }
+
+  // 热股榜 TOP10
+  async function renderHotList() {
+    const el = document.getElementById('hot-list');
+    if (!el) return;
+    let data;
+    try { data = await get('/api/market/hot'); } catch (e) { el.innerHTML = '<div class="empty">加载失败</div>'; return; }
+    const items = (data.item || []).slice(0, 10);
+    if (!items.length) { el.innerHTML = '<div class="empty">暂无数据</div>'; return; }
+    el.innerHTML = items.map(it => {
+      const trendIcon = it.rank_trend === 'up' ? '↑' : it.rank_trend === 'down' ? '↓' : '—';
+      const trendCls = it.rank_trend === 'up' ? 'up' : it.rank_trend === 'down' ? 'down' : '';
+      return '<div class="hot-item" data-code="' + it.thscode + '">' +
+        '<span class="hot-rank' + (it.rank <= 3 ? ' top' : '') + '">' + it.rank + '</span>' +
+        '<span class="hot-name">' + esc(it.name) + '</span>' +
+        '<span class="hot-pct ' + trendCls + '">' + trendIcon + '</span></div>';
+    }).join('');
+    el.querySelectorAll('.hot-item').forEach(item => {
+      item.addEventListener('click', () => {
+        const tabs = document.getElementById('index-tabs');
+        tabs && tabs.querySelectorAll('.index-tab').forEach(x => x.classList.remove('active'));
+        loadKline(item.dataset.code);
+      });
+    });
+  }
+
+  async function loadKline(code, silent) {
     const el = document.getElementById('kline-chart');
     if (!el) return;
+    curKlineCode = code;
     let data;
     try { data = await get('/api/kline/' + encodeURIComponent(code)); }
     catch (e) {
-      document.getElementById('kline-name').textContent = '未找到 ' + code;
+      if (!silent) document.getElementById('kline-name').textContent = '未找到 ' + code;
       return;
     }
     const ix = INDEXES.find(i => i.code === code);
@@ -378,7 +458,7 @@
         '最新 ' + fmt(last.ohlc[1]) + '  ' + pct(chg);
     }
 
-    const chart = echarts.init(el);
+    const chart = echarts.getInstanceByDom(el) || echarts.init(el);
     chart.setOption({
       backgroundColor: 'transparent',
       animation: false,
