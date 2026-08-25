@@ -308,6 +308,73 @@ a:hover { text-decoration: underline; }
 .today-events .ev-ok b { color: var(--up); }
 .today-events .ev-warn b { color: var(--accent2); }
 
+/* ================= 移动端适配（≤768px） ================= */
+@media (max-width: 768px) {
+  body { font-size: 15px; }
+  .content { margin: 12px auto; padding: 0 12px; }
+
+  /* 顶栏：紧凑 */
+  .topbar { height: 48px; gap: 12px; padding: 0 12px; }
+  .brand { font-size: 16px; }
+  .mainnav a { padding: 8px 12px; }
+  .sys-status { font-size: 11px; }
+
+  /* 状态条：横向滑动，不换行 */
+  .statusbar {
+    top: 48px; padding: 6px 12px; gap: 14px;
+    flex-wrap: nowrap; overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .statusbar::-webkit-scrollbar { display: none; }
+  .statusbar .ix, .statusbar .breadth, .statusbar .regime { flex-shrink: 0; scroll-snap-align: start; }
+
+  /* 卡片/面板 */
+  .panel { padding: 14px; border-radius: 8px; }
+  .overview-cards { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .ov-card { padding: 12px 14px; }
+  .ov-card .value { font-size: 20px; }
+  .acct-grid { grid-template-columns: 1fr; }
+  .cards { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .card { padding: 12px; }
+  .card .value { font-size: 18px; }
+
+  /* 触控目标 ≥40px */
+  .tab, .index-tab { padding: 10px 16px; font-size: 14px; }
+  .btn-ghost, .del-btn, .form button { padding: 10px 18px; min-height: 40px; }
+  .btn-new { padding: 8px 14px; }
+
+  /* 表格 → 卡片列表 */
+  .tbl thead { display: none; }
+  .tbl, .tbl tbody, .tbl tr, .tbl td { display: block; width: 100%; }
+  .tbl tr {
+    border: 1px solid var(--border); border-radius: 8px;
+    margin-bottom: 10px; padding: 10px 12px; background: var(--panel2);
+  }
+  .tbl td {
+    border: none; padding: 4px 0; display: flex; justify-content: space-between; align-items: baseline;
+  }
+  .tbl td::before { content: attr(data-label); color: var(--muted); font-size: 12px; margin-right: 10px; }
+  .tbl td.no-label::before { display: none; }
+
+  /* K线：手机降高，隐藏 slider 改手势缩放 */
+  .chart-lg { height: 380px; }
+  .market-grid { grid-template-columns: 1fr; }
+
+  /* 决策卡片：动作徽章置顶突出，时间弱化 */
+  .dec-card-head { flex-wrap: wrap; gap: 6px; }
+  .dec-acts { margin: 6px 0; }
+  .act-badge { font-size: 13px; padding: 5px 10px; }
+
+  /* 决策动态 */
+  .feed-item { flex-wrap: wrap; gap: 6px; }
+  .feed-note { flex-basis: 100%; }
+
+  /* 登录/表单 */
+  .form input { padding: 12px; font-size: 16px; } /* 16px 防 iOS 聚焦自动缩放 */
+}
+
 /* 风控状态条 */
 .risk-row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .risk-item { color: var(--muted); font-size: 13px; }

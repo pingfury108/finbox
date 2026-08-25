@@ -289,9 +289,9 @@
       html += '<table class="tbl" style="margin-top:10px"><thead><tr><th>标的</th><th>现价</th><th>成本</th><th>距止损线(-5%)</th><th>距止盈线(+15%)</th></tr></thead><tbody>';
       html += r.positions.map(p => {
         const stopCls = p.to_stop_pct < 2 ? 'up' : '';
-        return '<tr><td>' + esc(p.name) + '</td><td>' + fmt(p.price) + '</td><td>' + fmt(p.avg_cost) + '</td>' +
-          '<td class="' + stopCls + '">' + fmt(p.to_stop_pct, 1) + '%</td>' +
-          '<td>' + fmt(p.to_profit_pct, 1) + '%</td></tr>';
+        return '<tr><td data-label="标的">' + esc(p.name) + '</td><td data-label="现价">' + fmt(p.price) + '</td><td data-label="成本">' + fmt(p.avg_cost) + '</td>' +
+          '<td data-label="距止损线" class="' + stopCls + '">' + fmt(p.to_stop_pct, 1) + '%</td>' +
+          '<td data-label="距止盈线">' + fmt(p.to_profit_pct, 1) + '%</td></tr>';
       }).join('');
       html += '</tbody></table>';
     } else {
@@ -356,10 +356,14 @@
     }
     pane.innerHTML = '<table class="tbl"><thead><tr><th>代码</th><th>名称</th><th>数量</th><th>成本</th><th>现价</th><th>浮动盈亏</th><th>盈亏率</th></tr></thead><tbody>' +
       positions.map(p =>
-        '<tr class="pos-row" data-code="' + p.thscode + '" title="点击查看K线"><td>' + p.thscode + '</td><td>' + esc(p.name) + '</td><td>' + p.quantity + '</td>' +
-        '<td>' + fmt(p.avg_cost) + '</td><td>' + fmt(p.price) + '</td>' +
-        '<td class="' + cls(p.pnl) + '">' + sign(p.pnl) + fmt(p.pnl, 0) + '</td>' +
-        '<td class="' + cls(p.pnl_pct) + '">' + pct(p.pnl_pct) + '</td></tr>'
+        '<tr class="pos-row" data-code="' + p.thscode + '" title="点击查看K线">' +
+        '<td data-label="代码">' + p.thscode + '</td>' +
+        '<td data-label="名称">' + esc(p.name) + '</td>' +
+        '<td data-label="数量">' + p.quantity + '</td>' +
+        '<td data-label="成本">' + fmt(p.avg_cost) + '</td>' +
+        '<td data-label="现价">' + fmt(p.price) + '</td>' +
+        '<td data-label="浮动盈亏" class="' + cls(p.pnl) + '">' + sign(p.pnl) + fmt(p.pnl, 0) + '</td>' +
+        '<td data-label="盈亏率" class="' + cls(p.pnl_pct) + '">' + pct(p.pnl_pct) + '</td></tr>'
       ).join('') + '</tbody></table>';
     // 点击持仓行 → 行情页看 K 线
     pane.querySelectorAll('.pos-row').forEach(r => {
@@ -379,10 +383,13 @@
     }
     pane.innerHTML = '<table class="tbl"><thead><tr><th>时间</th><th>方向</th><th>代码</th><th>名称</th><th>数量</th><th>价格</th><th>金额</th><th>费用</th></tr></thead><tbody>' +
       trades.map(t =>
-        '<tr><td>' + fmtTime(t.ts_ms) + '</td>' +
-        '<td class="' + (t.side === 'BUY' ? 'up' : 'down') + '">' + (t.side === 'BUY' ? '买入' : '卖出') + '</td>' +
-        '<td>' + t.thscode + '</td><td>' + esc(t.name) + '</td><td>' + t.quantity + '</td>' +
-        '<td>' + fmt(t.price) + '</td><td>' + fmt(t.amount) + '</td><td>' + fmt(t.fee) + '</td></tr>'
+        '<tr><td data-label="时间">' + fmtTime(t.ts_ms) + '</td>' +
+        '<td data-label="方向" class="' + (t.side === 'BUY' ? 'up' : 'down') + '">' + (t.side === 'BUY' ? '买入' : '卖出') + '</td>' +
+        '<td data-label="代码">' + t.thscode + '</td><td data-label="名称">' + esc(t.name) + '</td>' +
+        '<td data-label="数量">' + t.quantity + '</td>' +
+        '<td data-label="价格">' + fmt(t.price) + '</td>' +
+        '<td data-label="金额">' + fmt(t.amount) + '</td>' +
+        '<td data-label="费用">' + fmt(t.fee) + '</td></tr>'
       ).join('') + '</tbody></table>';
   }
 
@@ -623,13 +630,16 @@
         '最新 ' + fmt(last.ohlc[1]) + '  ' + pct(chg);
     }
 
+    const isMobile = window.innerWidth <= 768;
     const chart = echarts.getInstanceByDom(el) || echarts.init(el);
     chart.setOption({
       backgroundColor: 'transparent',
       animation: false,
       legend: { data: ['MA5', 'MA10', 'MA20', 'MA60'], textStyle: { color: '#8b949e' }, top: 0 },
       tooltip: {
-        trigger: 'axis', axisPointer: { type: 'cross' },
+        trigger: 'axis',
+        // 移动端用竖线吸附（十字光标为鼠标设计）
+        axisPointer: { type: isMobile ? 'line' : 'cross' },
         formatter: params => {
           const d = params[0] && params[0].dataIndex;
           if (d === undefined) return '';
@@ -641,8 +651,8 @@
       },
       axisPointer: { link: [{ xAxisIndex: 'all' }] },
       grid: [
-        { left: 60, right: 20, top: 32, height: '58%' },
-        { left: 60, right: 20, top: '74%', height: '18%' },
+        { left: isMobile ? 44 : 60, right: 12, top: 32, height: '58%' },
+        { left: isMobile ? 44 : 60, right: 12, top: '74%', height: '18%' },
       ],
       xAxis: [
         { type: 'category', data: data.points.map(p => p.date), gridIndex: 0,
@@ -658,8 +668,9 @@
       ],
       dataZoom: [
         { type: 'inside', xAxisIndex: [0, 1], start: 82, end: 100 },
-        { type: 'slider', xAxisIndex: [0, 1], bottom: 2, height: 16,
-          borderColor: '#2a3140', fillerColor: 'rgba(88,166,255,0.1)' },
+        // 移动端隐藏 slider（16px 手指拖不动），用双指捏合缩放
+        ...(isMobile ? [] : [{ type: 'slider', xAxisIndex: [0, 1], bottom: 2, height: 16,
+          borderColor: '#2a3140', fillerColor: 'rgba(88,166,255,0.1)' }]),
       ],
       series: [
         { name: '日K', type: 'candlestick', data: data.points.map(p => p.ohlc),
