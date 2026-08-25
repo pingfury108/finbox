@@ -272,7 +272,6 @@ async fn market_page() -> impl IntoResponse {    let body = r#"<div class="panel
 async fn login_page() -> impl IntoResponse {
     let body = r#"<section class="panel login-panel">
   <h2>🔒 需要管理口令</h2>
-  <p class="hint">该操作受保护。口令由部署者通过环境变量 ADMIN_KEY 或 --admin-key 配置。</p>
   <form method=post class="form">
     <label>管理口令 <input name=key type=password autofocus></label>
     <button type=submit>进入</button>
@@ -319,26 +318,23 @@ async fn settings_page(State(st): State<WebState>, headers: axum::http::HeaderMa
         let l = m.meta_get("llm_api_key").ok().flatten().unwrap_or_else(|| c.llm_api_key.clone());
         (h, l)
     };
-    // 掩码显示 key
-    let mask = |s: &str| if s.len() > 10 { format!("{}****{}", &s[..6], &s[s.len()-4..]) } else { "****".to_string() };
-    let admin_state = if c.admin_key.is_empty() { "未启用（设 ADMIN_KEY 环境变量启用）".to_string() } else { "已启用 ●（由环境变量配置，Web 不可改）".to_string() };
+    // 掩码显示 key（input 留空=不修改）
+    let mask = |s: &str| if s.is_empty() { "未设置".to_string() } else if s.len() > 10 { format!("{}****{}", &s[..6], &s[s.len()-4..]) } else { "已设置".to_string() };
     let body = format!(
         r#"<section class="panel"><h2>API 密钥</h2>
-        <p class="hint">当前: 同花顺 <code>{}</code> · AI <code>{}</code>。保存后即时生效。</p>
         <form method=post class="form">
-          <label>同花顺数据 Key <input name=hithink_api_key value="{}" type=text></label>
-          <label>AI Key <input name=llm_api_key value="{}" type=text></label>
+          <label>同花顺数据 Key <input name=hithink_api_key value="" type=password placeholder="{}"></label>
+          <label>AI Key <input name=llm_api_key value="" type=password placeholder="{}"></label>
           <label>AI 服务地址 <input name=llm_base_url value="{}" type=text></label>
           <label>AI 模型 <input name=llm_model value="{}" type=text></label>
           <h2 style="margin-top:18px">参数</h2>
           <label>候选股数量 <input name=candidate_count value="{}" type=number></label>
           <label>行情刷新间隔(秒) <input name=collect_interval_seconds value="{}" type=number></label>
           <button type=submit>保存</button>
-        </form></section>
-        <section class="panel"><h2>安全</h2><p class="hint">管理口令: {}</p></section>"#,
+          <p class="hint" style="margin-top:8px">Key 留空则不修改；保存后即时生效。</p>
+        </form></section>"#,
         esc(&mask(&hk)), esc(&mask(&lk)),
-        esc(&hk), esc(&lk), esc(&c.llm_base_url), esc(&c.llm_model), c.candidate_count, c.collect_interval_seconds,
-        esc(&admin_state)
+        esc(&c.llm_base_url), esc(&c.llm_model), c.candidate_count, c.collect_interval_seconds
     );
     layout("设置", "settings", &body).into_response()
 }
@@ -362,8 +358,13 @@ async fn save_settings(
         return Err(StatusCode::UNAUTHORIZED);
     }
     let m = st.market.lock().unwrap();
-    m.meta_set("hithink_api_key", &form.hithink_api_key).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    m.meta_set("llm_api_key", &form.llm_api_key).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Key 留空 = 不修改（保留原值）
+    if !form.hithink_api_key.is_empty() {
+        m.meta_set("hithink_api_key", &form.hithink_api_key).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    if !form.llm_api_key.is_empty() {
+        m.meta_set("llm_api_key", &form.llm_api_key).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
     m.meta_set("llm_base_url", &form.llm_base_url).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     m.meta_set("llm_model", &form.llm_model).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     m.meta_set("candidate_count", &form.candidate_count.to_string()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
