@@ -61,7 +61,15 @@ impl Scheduler {
     }
 
     /// 主循环：采集任务 + 账户动态发现 + Web 界面，同进程并行。
-    pub async fn run(self) -> anyhow::Result<()> {
+    pub async fn run(mut self) -> anyhow::Result<()> {
+        // 空库自检：tickers 为空说明从未 init，自动执行首次全量建库
+        let empty = self.market.lock().unwrap().stats().map(|s| s.tickers == 0).unwrap_or(false);
+        if empty {
+            log::info!("[初始化] 检测到空库，开始首次全量建库（代码表+日历+10年日K+复权，约3分钟）...");
+            self.auto_init().await?;
+            log::info!("[初始化] 建库完成，启动系统");
+        }
+
         let mut handles = Vec::new();
 
         // Web 界面（同进程，端口用环境变量 FINBOX_BIND，默认 0.0.0.0:8000）
@@ -88,6 +96,24 @@ impl Scheduler {
             }
         }
         let _ = collect_handle.await;
+        Ok(())
+    }
+
+    /// 首次全量建库（自动 init）：失败即中止启动（无数据的系统空转无意义）。
+    async fn auto_init(&mut self) -> anyhow::Result<()> {
+        use anyhow::Context;
+        self.refresh_collector_key()?;
+        let dump_dir = std::path::Path::new(&self.cfg.data_dir).join("dumps");
+        let n = self.collector.sync_tickers().await.context("同步代码表失败")?;
+        log::info!("[初始化] 代码表: {n} 只");
+        let days = self.collector.client.trading_days().await.context("获取交易日历失败（检查 HITHINK_FINANCE_API_KEY）")?;
+        self.collector.upsert_trading_days(&days).await?;
+        log::info!("[初始化] 交易日历: {} 天", days.item.len());
+        self.collector.sync_daily_bars(&dump_dir, &days).await.context("同步日K失败")?;
+        let n = self.collector.import_adjustment_factors(&dump_dir).await.context("导入复权因子失败")?;
+        log::info!("[初始化] 复权事件: {n} 行");
+        let n = self.collector.sync_index_bars(1200).await.context("同步指数日K失败")?;
+        log::info!("[初始化] 指数日K: {n} 根");
         Ok(())
     }
 

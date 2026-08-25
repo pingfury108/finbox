@@ -10,6 +10,7 @@ duckdb = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 finbox-core = { path = "../finbox-core" }
+log = "0.4"
 
 [dev-dependencies]
 finbox-core = { path = "../finbox-core" }

@@ -43,6 +43,63 @@ pub fn open_market_shared(path: impl AsRef<Path>) -> Result<SharedDb> {
     Ok(Arc::new(Mutex::new(Db::open_market(path)?)))
 }
 
+/// parquet 扩展自举：先试本地 LOAD；失败则自动下载安装（curl 30s 超时，防卡死）后再 LOAD。
+///
+/// 背景：DuckDB 默认 autoload 会连 extensions.duckdb.org（Cloudflare）下载扩展，
+/// 国内网络下无超时挂起导致进程卡死。因此 autoload 已全局关闭，改由本函数显式管理：
+/// 本地扩展文件位于 ~/.duckdb/extensions/v{version}/{platform}/，缺失时显式下载（带超时）。
+fn ensure_parquet_extension(conn: &duckdb::Connection) -> Result<()> {
+    if conn.execute_batch("LOAD parquet;").is_ok() {
+        return Ok(());
+    }
+    install_parquet_extension(conn)?;
+    conn.execute_batch("LOAD parquet;")
+        .map_err(|e| StoreError::Extension(format!("下载后仍无法加载: {e}")))?;
+    Ok(())
+}
+
+/// 下载并安装 parquet 扩展到本地扩展目录。curl/gunzip 走系统命令（自动读代理环境变量）。
+fn install_parquet_extension(conn: &duckdb::Connection) -> Result<()> {
+    let version: String = conn
+        .query_row("SELECT version()", [], |r| r.get(0))
+        .map_err(StoreError::Duckdb)?;
+    let version = version.trim().trim_start_matches('v');
+    let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "linux_amd64",
+        ("linux", "aarch64") => "linux_arm64",
+        ("macos", "aarch64") => "osx_arm64",
+        ("macos", "x86_64") => "osx_amd64",
+        ("windows", "x86_64") => "windows_amd64",
+        (os, arch) => return Err(StoreError::Extension(format!("不支持的平台 {os}/{arch}"))),
+    };
+    let home = std::env::var("HOME").map_err(|_| StoreError::Extension("HOME 未设置".into()))?;
+    let dir = format!("{home}/.duckdb/extensions/v{version}/{platform}");
+    std::fs::create_dir_all(&dir)?;
+    let gz = format!("{dir}/parquet.duckdb_extension.gz");
+    let url = format!("https://extensions.duckdb.org/v{version}/{platform}/parquet.duckdb_extension.gz");
+    log::info!("下载 parquet 扩展: {url}");
+    let ok = std::process::Command::new("curl")
+        .args(["-sfL", "--max-time", "30", "-o", &gz, &url])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        return Err(StoreError::Extension(format!(
+            "下载失败（30s 超时或网络不可达）: {url}。可手动下载后放入 {dir}/ 并 gunzip"
+        )));
+    }
+    let ok = std::process::Command::new("gunzip")
+        .args(["-f", &gz])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        return Err(StoreError::Extension(format!("gunzip 解压失败: {gz}")));
+    }
+    log::info!("parquet 扩展已安装到 {dir}");
+    Ok(())
+}
+
 /// 打开共享账户库句柄。
 pub fn open_account_shared(path: impl AsRef<Path>) -> Result<SharedDb> {
     Ok(Arc::new(Mutex::new(Db::open_account(path)?)))
@@ -54,6 +111,8 @@ pub enum StoreError {
     Duckdb(#[from] duckdb::Error),
     #[error("IO 错误: {0}")]
     Io(#[from] std::io::Error),
+    #[error("parquet 扩展不可用: {0}")]
+    Extension(String),
 }
 
 /// 标的代码行。
@@ -262,8 +321,10 @@ impl Db {
         } else {
             Connection::open_with_flags(path, config)?
         };
-        // 本地加载 parquet 扩展（扩展文件需预置于 ~/.duckdb/extensions/<ver>/<platform>/）
-        let _ = conn.execute_batch("LOAD parquet;");
+        // parquet 扩展自举：LOAD 失败自动下载安装（日K导入依赖，失败仅告警不阻塞启动）
+        if let Err(e) = ensure_parquet_extension(&conn) {
+            log::warn!("parquet 扩展不可用: {e}（日K parquet 导入将失败）");
+        }
         let _ = conn.execute_batch(MARKET_SCHEMA);
         let _ = conn.execute_batch(ACCOUNT_SCHEMA);
         Ok(Self { conn })
@@ -306,8 +367,8 @@ impl Db {
         } else {
             Connection::open_with_flags(path, config)?
         };
-        // 本地加载 parquet 扩展（扩展文件需预置于 ~/.duckdb/extensions/<ver>/<platform>/）
-        let _ = conn.execute_batch("LOAD parquet;");
+        // parquet 扩展自举（账户库等不依赖 parquet，失败静默降级）
+        let _ = ensure_parquet_extension(&conn);
         conn.execute_batch(schema)?;
         Ok(Self { conn })
     }
