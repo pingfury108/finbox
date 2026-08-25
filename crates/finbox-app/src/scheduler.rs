@@ -422,8 +422,9 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
         if price <= 0.0 {
             return 0;
         }
-        let acct = self.acct.lock().unwrap();
+        // read_acct_conf 内部会自行 lock acct，必须在持锁前调用（std Mutex 不可重入，否则自锁死锁）
         let conf = read_acct_conf(&self.cfg, &self.acct);
+        let acct = self.acct.lock().unwrap();
         let account = match acct.get_or_init_account(conf.initial_capital) {
             Ok(a) => a,
             Err(_) => return 0,
@@ -493,8 +494,9 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
     }
 
     async fn snapshot_account(&self) -> anyhow::Result<()> {
-        let acct = self.acct.lock().unwrap();
+        // read_acct_conf 内部自行 lock，必须在持锁前调用（防自锁）
         let conf = read_acct_conf(&self.cfg, &self.acct);
+        let acct = self.acct.lock().unwrap();
         let account = acct.get_or_init_account(conf.initial_capital)?;
         let total = acct.total_asset_estimate(&account)?;
         drop(acct);
