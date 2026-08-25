@@ -385,35 +385,68 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
         self.decision.reload_llm(&self.market, &defaults);
         let result = self.decision.decide(conf.candidate_count).await?;
         log::info!("[{}][决策] 状态 {} 意图 {} 条", self.name, result.status, result.intents.len());
+        // 执行结果汇总：全部成交 → executed；有拒单 → rejected（追加原因）
+        let mut filled = 0usize;
+        let mut rejects: Vec<String> = Vec::new();
         for intent in &result.intents {
             match intent.side {
-                finbox_core::OrderSide::Buy => self.execute_buy(intent, report.max_total_pct).await?,
+                finbox_core::OrderSide::Buy => {
+                    if let Some(r) = self.execute_buy(intent, report.max_total_pct).await? {
+                        rejects.push(r);
+                    } else {
+                        filled += 1;
+                    }
+                }
                 finbox_core::OrderSide::Sell => {
                     // AI 主动性卖出（趋势走坏/到目标）
                     match self.broker.submit(intent.clone()).await {
-                        Ok(e) => log::info!("[{}][成交] 卖出 {} {}股 @ {:.2}", self.name, e.intent.thscode, e.intent.quantity, e.price),
-                        Err(e) => log::info!("[{}][拒单] 卖出 {}: {e}", self.name, intent.thscode),
+                        Ok(e) => {
+                            log::info!("[{}][成交] 卖出 {} {}股 @ {:.2}", self.name, e.intent.thscode, e.intent.quantity, e.price);
+                            filled += 1;
+                        }
+                        Err(e) => {
+                            log::info!("[{}][拒单] 卖出 {}: {e}", self.name, intent.thscode);
+                            rejects.push(format!("{}: {e}", intent.thscode));
+                        }
                     }
                 }
+            }
+        }
+        // 回写执行结果到决策日志（建议页可区分"说了做了"vs"说了没做成"）
+        if result.log_id > 0 && result.status == "parsed" {
+            let (st, note) = if !result.intents.is_empty() && rejects.is_empty() {
+                ("executed", Some(format!(" [执行] 成交{}笔", filled)))
+            } else if !rejects.is_empty() {
+                ("rejected", Some(format!(" [执行] 成交{}笔 拒单{}笔: {}", filled, rejects.len(), rejects.join("; "))))
+            } else {
+                ("executed", None) // 无意图（观望类）
+            };
+            if let Err(e) = self.acct.lock().unwrap().update_decision_status(result.log_id, st, note.as_deref()) {
+                log::warn!("[{}][决策] 回写执行状态失败: {e}", self.name);
             }
         }
         Ok(())
     }
 
-    /// 执行买入：数量由系统按仓位约束计算。
-    async fn execute_buy(&self, intent: &finbox_core::OrderIntent, max_total_pct: f64) -> anyhow::Result<()> {
+    /// 执行买入：数量由系统按仓位约束计算。返回 Some(拒单原因) 表示未成交。
+    async fn execute_buy(&self, intent: &finbox_core::OrderIntent, max_total_pct: f64) -> anyhow::Result<Option<String>> {
         let qty = self.position_size(intent, max_total_pct).await;
         if qty < 100 {
             log::info!("[{}][决策] {} 仓位不足一手，跳过", self.name, intent.thscode);
-            return Ok(());
+            return Ok(Some(format!("{} 仓位不足一手", intent.thscode)));
         }
         let mut i = intent.clone();
         i.quantity = qty;
         match self.broker.submit(i.clone()).await {
-            Ok(e) => log::info!("[{}][成交] 买入 {} {}股 @ {:.2}", self.name, e.intent.thscode, e.intent.quantity, e.price),
-            Err(e) => log::info!("[{}][拒单] 买入 {}: {e}", self.name, i.thscode),
+            Ok(e) => {
+                log::info!("[{}][成交] 买入 {} {}股 @ {:.2}", self.name, e.intent.thscode, e.intent.quantity, e.price);
+                Ok(None)
+            }
+            Err(e) => {
+                log::info!("[{}][拒单] 买入 {}: {e}", self.name, i.thscode);
+                Ok(Some(format!("{}: {e}", i.thscode)))
+            }
         }
-        Ok(())
     }
 
     async fn position_size(&self, intent: &finbox_core::OrderIntent, max_total_pct: f64) -> u32 {

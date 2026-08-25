@@ -35,6 +35,22 @@ impl Db {
         Ok(id)
     }
 
+    /// 回写决策执行结果：更新状态，可选追加执行结果到 note。
+    pub fn update_decision_status(&self, id: i64, status: &str, note_suffix: Option<&str>) -> Result<()> {
+        if let Some(suffix) = note_suffix {
+            self.conn.execute(
+                "UPDATE decision_logs SET status = ?, note = note || ? WHERE id = ?",
+                duckdb::params![status, suffix, id],
+            )?;
+        } else {
+            self.conn.execute(
+                "UPDATE decision_logs SET status = ? WHERE id = ?",
+                duckdb::params![status, id],
+            )?;
+        }
+        Ok(())
+    }
+
     /// 最近 N 条已执行决策（供 AI 复盘反馈）。
     pub fn recent_executed_decisions(&self, limit: u32) -> Result<Vec<DecisionLog>> {
         let mut stmt = self.conn.prepare(
