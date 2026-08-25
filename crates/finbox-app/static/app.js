@@ -43,14 +43,21 @@
       '<span class="sep"></span>' +
       '<span class="breadth">涨 ' + ov.up + ' / ' + ov.total + '</span>' +
       '<span class="regime ' + ov.regime + '">' + regimeText + '</span>';
-    // 系统状态灯：快照时间超过 10 分钟（非交易时段除外）提示
+    // 系统状态灯：仅盘中（9:30-15:00）数据超 10 分钟未更新才标红；非盘中显示收盘状态
     const sys = document.getElementById('sys-status');
     if (sys) {
+      const now = new Date();
+      const mins = now.getHours() * 60 + now.getMinutes();
+      const inSession = mins >= 9 * 60 + 30 && mins < 15 * 60;
       const lag = Date.now() - ov.ts_ms;
-      const stale = ov.ts_ms > 0 && lag > 10 * 60 * 1000;
+      const stale = inSession && ov.ts_ms > 0 && lag > 10 * 60 * 1000;
+      let label;
+      if (ov.ts_ms <= 0) label = '待采集';
+      else if (inSession) label = '数据 ' + fmtTime(ov.ts_ms);
+      else if (mins >= 15 * 60) label = '已收盘 ' + fmtTime(ov.ts_ms);
+      else label = '待开盘 ' + fmtTime(ov.ts_ms);
       sys.className = 'sys-status' + (stale ? ' stale' : '');
-      sys.innerHTML = '<span class="dot"></span>' +
-        (ov.ts_ms > 0 ? '数据 ' + fmtTime(ov.ts_ms) : '待采集');
+      sys.innerHTML = '<span class="dot"></span>' + label;
     }
   }
   function startStatusBar() {
