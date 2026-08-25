@@ -413,6 +413,11 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
     }
 
     async fn position_size(&self, intent: &finbox_core::OrderIntent, max_total_pct: f64) -> u32 {
+        // 先取行情价（market 锁，短），释放后再取账户/持仓（acct 锁），避免双锁嵌套死锁
+        let price = self.market.lock().unwrap().latest_snapshot_price(&intent.thscode).ok().flatten().unwrap_or(0.0);
+        if price <= 0.0 {
+            return 0;
+        }
         let acct = self.acct.lock().unwrap();
         let conf = read_acct_conf(&self.cfg, &self.acct);
         let account = match acct.get_or_init_account(conf.initial_capital) {
@@ -420,10 +425,6 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
             Err(_) => return 0,
         };
         let total_est = acct.total_asset_estimate(&account).unwrap_or(account.cash);
-        let price = self.market.lock().unwrap().latest_snapshot_price(&intent.thscode).ok().flatten().unwrap_or(0.0);
-        if price <= 0.0 {
-            return 0;
-        }
         let positions = acct.positions().unwrap_or_default();
         if positions.len() >= 3 && !positions.iter().any(|p| p.thscode == intent.thscode) {
             return 0;
