@@ -362,7 +362,7 @@ pub async fn risk_status(
             mv += price * p.quantity as f64;
             let to_stop = if p.avg_cost > 0.0 { (price / (p.avg_cost * 0.95) - 1.0) * 100.0 } else { 0.0 };
             let to_profit = if p.avg_cost > 0.0 { (price / (p.avg_cost * 1.15) - 1.0) * 100.0 } else { 0.0 };
-            rows.push(RiskRow { thscode: p.thscode.clone(), name: p.name.clone(), price, avg_cost: p.avg_cost, to_stop_pct: to_stop, to_profit_pct: to_profit });
+            rows.push(RiskRow { thscode: p.thscode.clone(), name: resolve_name(&m, &p.thscode, &p.name), price, avg_cost: p.avg_cost, to_stop_pct: to_stop, to_profit_pct: to_profit });
         }
     }
     let total = cash + mv;
@@ -405,12 +405,7 @@ pub async fn positions(
             let price = m.latest_snapshot_price(&p.thscode).ok().flatten().unwrap_or(p.avg_cost);
             let pnl = (price - p.avg_cost) * p.quantity as f64;
             let pnl_pct = if p.avg_cost > 0.0 { (price / p.avg_cost - 1.0) * 100.0 } else { 0.0 };
-            // 历史遗留：早期买入时名称为空用了代码占位，读取时从行情库补全
-            let pname = if p.name.is_empty() || p.name == p.thscode {
-                m.ticker_name(&p.thscode).unwrap_or_else(|_| p.thscode.clone())
-            } else {
-                p.name.clone()
-            };
+            let pname = resolve_name(&m, &p.thscode, &p.name);
             out.push(PositionRow {
                 thscode: p.thscode.clone(),
                 name: pname,
@@ -449,12 +444,7 @@ pub async fn trades(
     let rows = acct.lock().unwrap().recent_trades(50).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
     let m = st.market.lock().unwrap();
     Ok(Json(rows.into_iter().map(|t| {
-        // 历史遗留占位名称读取时补全
-        let tname = if t.name.is_empty() || t.name == t.thscode {
-            m.ticker_name(&t.thscode).unwrap_or_else(|_| t.thscode.clone())
-        } else {
-            t.name
-        };
+        let tname = resolve_name(&m, &t.thscode, &t.name);
         TradeRow {
         ts_ms: t.ts_ms,
         thscode: t.thscode,
@@ -554,6 +544,15 @@ pub async fn accounts_equity_all(State(st): State<WebState>) -> Json<Vec<serde_j
         }
     }
     Json(out)
+}
+
+/// 名称补全：历史遗留记录 name 为空或等于代码时，从行情库查真实名称。
+fn resolve_name(m: &finbox_store::Db, thscode: &str, name: &str) -> String {
+    if name.is_empty() || name == thscode {
+        m.ticker_name(thscode).unwrap_or_else(|_| thscode.to_string())
+    } else {
+        name.to_string()
+    }
 }
 
 fn fmt_date(ms: i64) -> String {
