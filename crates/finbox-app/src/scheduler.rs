@@ -25,7 +25,7 @@ struct AccountCtx {
     /// 今日是否已收盘处理
     closed_today: bool,
     market: SharedDb,
-    acct: SharedDb,
+    acct: finbox_store::SharedAccountDb,
     broker: SimBroker,
     decision: DecisionEngine,
     risk: RiskManager,
@@ -215,7 +215,7 @@ fn build_account_ctx(
     cfg: &Config,
     name: &str,
     market: SharedDb,
-    acct: SharedDb,
+    acct: finbox_store::SharedAccountDb,
 ) -> AccountCtx {
     let conf = read_acct_conf(cfg, &acct);
     let decision = DecisionEngine::new(
@@ -234,7 +234,7 @@ fn build_account_ctx(
 }
 
 /// 读取账户配置（meta 优先，.env 兜底），每次调用都读 → 热更新。
-fn read_acct_conf(cfg: &Config, acct: &SharedDb) -> AcctConf {
+fn read_acct_conf(cfg: &Config, acct: &finbox_store::SharedAccountDb) -> AcctConf {
     let db = acct.lock().unwrap();
     let get = |key: &str, def: f64| -> f64 {
         db.meta_get(key)

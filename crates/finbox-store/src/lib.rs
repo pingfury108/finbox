@@ -16,10 +16,11 @@ use std::sync::{Arc, Mutex};
 use duckdb::{params, Config, Connection};
 
 pub mod adjust;
-pub mod trading;
-pub mod market;
 pub mod decision;
+pub mod market;
 pub mod review;
+pub mod sqlite;
+pub mod trading;
 
 pub use decision::*;
 pub use market::*;
@@ -101,10 +102,12 @@ fn install_parquet_extension(conn: &duckdb::Connection) -> Result<()> {
     Ok(())
 }
 
-/// 打开共享账户库句柄。
-pub fn open_account_shared(path: impl AsRef<Path>) -> Result<SharedDb> {
-    Ok(Arc::new(Mutex::new(Db::open_account(path)?)))
+/// 打开共享账户库句柄（SQLite 实现；账户数据为事务型小数据，用成熟稳定的 SQLite）。
+pub fn open_account_shared(path: impl AsRef<Path>) -> Result<sqlite::SharedAccountDb> {
+    sqlite::open_account_db(path)
 }
+
+pub use sqlite::{AccountDb, SharedAccountDb};
 
 #[derive(Debug, Error)]
 pub enum StoreError {

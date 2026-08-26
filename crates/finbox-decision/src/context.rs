@@ -48,7 +48,7 @@ fn trend_summary(db: &Db, thscode: &str) -> String {
 /// 构建用户上下文文本。
 pub fn build_context(
     market: &finbox_store::SharedDb,
-    acct: &finbox_store::SharedDb,
+    acct: &finbox_store::SharedAccountDb,
     watchlist: &[String],
     candidates: &[Candidate],
 ) -> finbox_store::Result<String> {

@@ -54,7 +54,7 @@ pub enum DecisionError {
 /// 决策引擎。
 pub struct DecisionEngine {
     market: SharedDb,
-    acct: SharedDb,
+    acct: finbox_store::SharedAccountDb,
     config: std::sync::Mutex<LlmConfig>,
     /// 自选池（可为空）
     watchlist: Vec<String>,
@@ -63,7 +63,7 @@ pub struct DecisionEngine {
 }
 
 impl DecisionEngine {
-    pub fn new(market: SharedDb, acct: SharedDb, config: LlmConfig, watchlist: Vec<String>) -> Self {
+    pub fn new(market: SharedDb, acct: finbox_store::SharedAccountDb, config: LlmConfig, watchlist: Vec<String>) -> Self {
         Self { market, acct, config: std::sync::Mutex::new(config), watchlist, screen_cache: std::sync::Mutex::new(None) }
     }
 

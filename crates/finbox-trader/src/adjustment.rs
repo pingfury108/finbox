@@ -22,7 +22,7 @@ fn dividend_tax_rate(hold_ms: i64) -> f64 {
 
 /// 应用所有持仓的待处理除权事件。返回处理的事件数。
 /// `today_ms` 为今日（Asia/Shanghai 零点）毫秒戳；ex_date <= today 的事件生效。
-pub fn apply_pending_adjustments(acct: &Db, market: &Db, today_ms: i64) -> finbox_store::Result<u32> {
+pub fn apply_pending_adjustments(acct: &finbox_store::AccountDb, market: &Db, today_ms: i64) -> finbox_store::Result<u32> {
     let positions = acct.positions()?;
     let mut applied = 0u32;
     for p in positions {
@@ -119,7 +119,7 @@ mod tests {
             // insert_trade 用当前时间；拨回 10 天前使除权事件晚于建仓
             a.conn().execute(
                 "UPDATE trades SET ts_ms = ? WHERE thscode = '600519.SH'",
-                duckdb::params![today - 10 * 86_400_000],
+                rusqlite::params![today - 10 * 86_400_000],
             ).unwrap();
         }
         {
@@ -167,7 +167,7 @@ mod tests {
                 amount: 100_000.0, fee: 30.0, decision_id: None,
             }).unwrap();
             // 买入时间拨到今天零点（与 today 一致）
-            a.conn().execute("UPDATE trades SET ts_ms = ? WHERE thscode = '600519.SH'", duckdb::params![today]).unwrap();
+            a.conn().execute("UPDATE trades SET ts_ms = ? WHERE thscode = '600519.SH'", rusqlite::params![today]).unwrap();
         }
         // 历史除权事件（去年分红 + 上周送股）
         {

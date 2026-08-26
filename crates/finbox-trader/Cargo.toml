@@ -17,3 +17,4 @@ log = "0.4"
 
 [dev-dependencies]
 duckdb = { workspace = true }
+rusqlite = { workspace = true }

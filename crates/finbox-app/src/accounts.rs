@@ -5,7 +5,7 @@
 //! data/
 //! ├── market.duckdb           # 共享行情库
 //! └── accounts/
-//!     └── <name>/account.duckdb  # 每账户独立状态库
+//!     └── <name>/account.db  # 每账户独立状态库（SQLite）
 //! ```
 
 use std::collections::HashMap;
@@ -13,14 +13,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
-use finbox_store::{open_account_shared, open_market_shared, SharedDb};
+use finbox_store::{open_account_shared, open_market_shared, SharedDb, SharedAccountDb};
 
 /// 账户库连接缓存：同进程内同账户共享单一 DuckDB 连接。
 ///
 /// 背景：DuckDB 同进程两次 open 同一文件会得到互不可见的独立实例——
 /// 账户任务写入的成交，Web 另开连接读不到（今天数据"停在昨天"的根因）。
 /// 因此账户任务与 Web 必须共享同一连接句柄。
-static ACCOUNT_DB_CACHE: Mutex<Option<HashMap<String, SharedDb>>> = Mutex::new(None);
+static ACCOUNT_DB_CACHE: Mutex<Option<HashMap<String, SharedAccountDb>>> = Mutex::new(None);
 
 /// 行情库连接缓存：全进程唯一 market 连接。
 static MARKET_DB_CACHE: Mutex<Option<SharedDb>> = Mutex::new(None);
@@ -49,7 +49,7 @@ pub fn list_accounts(data_dir: &str) -> Result<Vec<AccountInfo>> {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        let db = entry.path().join("account.duckdb");
+        let db = entry.path().join("account.db");
         if db.exists() {
             out.push(AccountInfo { name });
         }
@@ -63,7 +63,7 @@ pub fn create_account(data_dir: &str, name: &str, initial_capital: f64) -> Resul
     let safe = sanitize_name(name);
     let dir = accounts_root(data_dir).join(&safe);
     std::fs::create_dir_all(&dir).with_context(|| format!("创建账户目录 {dir:?}"))?;
-    let db_path = dir.join("account.duckdb");
+    let db_path = dir.join("account.db");
     if db_path.exists() {
         anyhow::bail!("账户「{safe}」已存在");
     }
@@ -89,10 +89,10 @@ pub fn remove_account(data_dir: &str, name: &str) -> Result<()> {
 }
 
 /// 打开账户库（共享句柄，进程内缓存：同账户始终同一连接）。
-pub fn open_account(data_dir: &str, name: &str) -> Result<SharedDb> {
+pub fn open_account(data_dir: &str, name: &str) -> Result<SharedAccountDb> {
     let safe = sanitize_name(name);
     let dir = accounts_root(data_dir).join(&safe);
-    let db = dir.join("account.duckdb");
+    let db = dir.join("account.db");
     if !db.exists() {
         anyhow::bail!("账户「{name}」不存在");
     }

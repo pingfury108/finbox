@@ -69,14 +69,14 @@ fn regime_max_total(breadth_ratio: f64) -> (&'static str, f64) {
 
 pub struct RiskManager {
     pub market: SharedDb,
-    pub acct: SharedDb,
+    pub acct: finbox_store::SharedAccountDb,
     pub config: RiskConfig,
     /// 进程内缓存的历史总资产峰值
     peak_cache: AtomicU64,
 }
 
 impl RiskManager {
-    pub fn new(market: SharedDb, acct: SharedDb, config: RiskConfig) -> Self {
+    pub fn new(market: SharedDb, acct: finbox_store::SharedAccountDb, config: RiskConfig) -> Self {
         Self { market, acct, config, peak_cache: AtomicU64::new(0) }
     }
 
@@ -203,7 +203,7 @@ impl RiskManager {
         peak
     }
 
-    fn current_peak_from(&self, db: &finbox_store::Db) -> f64 {
+    fn current_peak_from(&self, db: &finbox_store::AccountDb) -> f64 {
         let v = self.peak_cache.load(AtomicOrdering::Relaxed);
         if v > 0 {
             return f64::from_bits(v);
@@ -225,7 +225,7 @@ mod tests {
     use super::*;
     use finbox_store::{open_account_shared, open_market_shared, SnapshotRow};
 
-    fn setup() -> (SharedDb, SharedDb, RiskManager) {
+    fn setup() -> (SharedDb, finbox_store::SharedAccountDb, RiskManager) {
         let market = open_market_shared(":memory:").unwrap();
         let acct = open_account_shared(":memory:").unwrap();
         let rm = RiskManager::new(market.clone(), acct.clone(), RiskConfig::default());

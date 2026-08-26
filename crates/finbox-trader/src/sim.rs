@@ -26,12 +26,12 @@ use crate::{Broker, BrokerError};
 /// 模拟盘券商。持有行情库（只读）与账户库（读写）。
 pub struct SimBroker {
     market: SharedDb,
-    acct: SharedDb,
+    acct: finbox_store::SharedAccountDb,
     initial_capital: f64,
 }
 
 impl SimBroker {
-    pub fn new(market: SharedDb, acct: SharedDb, initial_capital: f64) -> Self {
+    pub fn new(market: SharedDb, acct: finbox_store::SharedAccountDb, initial_capital: f64) -> Self {
         Self { market, acct, initial_capital }
     }
 }
@@ -93,7 +93,7 @@ fn fees(amount: f64, side: OrderSide) -> f64 {
 }
 
 fn buy(
-    acct: &mut finbox_store::Db,
+    acct: &mut finbox_store::AccountDb,
     intent: &OrderIntent,
     price: f64,
     prev_close: Option<f64>,
@@ -186,7 +186,7 @@ fn buy(
 }
 
 fn sell(
-    acct: &mut finbox_store::Db,
+    acct: &mut finbox_store::AccountDb,
     intent: &OrderIntent,
     price: f64,
     prev_close: Option<f64>,
@@ -318,7 +318,7 @@ mod tests {
     }
 
     /// 内存行情库 + 账户库。
-    fn setup() -> (SharedDb, SharedDb) {
+    fn setup() -> (SharedDb, finbox_store::SharedAccountDb) {
         force_trading_time_set(true);
         let market = finbox_store::open_market_shared(":memory:").unwrap();
         let acct = finbox_store::open_account_shared(":memory:").unwrap();
@@ -366,7 +366,7 @@ mod tests {
         }
     }
 
-    fn buy_direct(acct: &mut finbox_store::Db, price: f64, qty: u32) -> Result<Execution, RejectReason> {
+    fn buy_direct(acct: &mut finbox_store::AccountDb, price: f64, qty: u32) -> Result<Execution, RejectReason> {
         buy(acct, &intent(qty), price, Some(10.0), 200000.0)
     }
 
