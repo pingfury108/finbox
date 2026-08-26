@@ -22,6 +22,9 @@ use finbox_store::{open_account_shared, open_market_shared, SharedDb};
 /// 因此账户任务与 Web 必须共享同一连接句柄。
 static ACCOUNT_DB_CACHE: Mutex<Option<HashMap<String, SharedDb>>> = Mutex::new(None);
 
+/// 行情库连接缓存：全进程唯一 market 连接。
+static MARKET_DB_CACHE: Mutex<Option<SharedDb>> = Mutex::new(None);
+
 /// 账户元信息。
 #[derive(Debug, Clone)]
 pub struct AccountInfo {
@@ -103,10 +106,18 @@ pub fn open_account(data_dir: &str, name: &str) -> Result<SharedDb> {
     Ok(shared)
 }
 
-/// 打开行情库（共享句柄）。
+/// 打开行情库（共享句柄，进程内缓存：全进程唯一 market 连接）。
+///
+/// 与账户库同理：采集任务/账户任务/Web 必须共享同一连接，否则互不可见。
 pub fn open_market(data_dir: &str) -> Result<SharedDb> {
+    let mut guard = MARKET_DB_CACHE.lock().unwrap();
+    if let Some(db) = guard.as_ref() {
+        return Ok(db.clone());
+    }
     let path = Path::new(data_dir).join("market.duckdb");
-    Ok(open_market_shared(path)?)
+    let shared = open_market_shared(path)?;
+    *guard = Some(shared.clone());
+    Ok(shared)
 }
 
 /// 账户名安全化（仅保留字母数字中文下划线）。
