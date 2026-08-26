@@ -70,6 +70,20 @@ impl Scheduler {
             log::info!("[初始化] 建库完成，启动系统");
         }
 
+        // 前复权表自检：为空（新表首次）则后台全量重建（不阻塞启动）
+        if self.market.lock().unwrap().adj_bars_empty().unwrap_or(false) {
+            let collector = finbox_collector::Collector::new(
+                hithink_sdk::Client::new(self.cfg.hithink_api_key.clone())?,
+                self.market.clone(),
+            );
+            tokio::spawn(async move {
+                if let Err(e) = collector.rebuild_adj_all().await {
+                    log::error!("[数据] 前复权全量重建失败: {e}");
+                }
+            });
+            log::info!("[数据] 前复权表为空，后台全量重建中（期间 AI 分析暂用原始价）");
+        }
+
         let mut handles = Vec::new();
 
         // Web 界面（同进程，端口用环境变量 FINBOX_BIND，默认 0.0.0.0:8000）
@@ -164,7 +178,11 @@ impl Scheduler {
                     self.collector.sync_daily_bars(std::path::Path::new("data/dumps"), &days).await?;
                     // 指数日K也补当天
                     let _ = self.collector.sync_index_bars(1200).await;
-                    log::info!("[采集][收盘后] 当日日K+指数同步完成");
+                    // 前复权日K增量（AI 分析用复权价）
+                    let today_ms = chrono::Local::now().date_naive().and_hms_opt(0,0,0).unwrap()
+                        .and_local_timezone(chrono::Local).unwrap().timestamp_millis();
+                    let _ = self.collector.adj_daily_update(today_ms).await;
+                    log::info!("[采集][收盘后] 当日日K+指数+前复权同步完成");
                     self.after_close_synced = true;
                 }
 

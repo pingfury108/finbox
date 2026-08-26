@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use duckdb::{params, Config, Connection};
 
+pub mod adjust;
 pub mod trading;
 pub mod market;
 pub mod decision;
@@ -213,6 +214,18 @@ CREATE TABLE IF NOT EXISTS adjustment_events (
     allotment_ratio     DOUBLE,
     allotment_price     DOUBLE,
     PRIMARY KEY (thscode, ex_date_ms)
+);
+CREATE TABLE IF NOT EXISTS adj_daily_bars (
+    thscode VARCHAR NOT NULL,
+    date_ms BIGINT NOT NULL,
+    date    VARCHAR NOT NULL,
+    open_price  DOUBLE,
+    high_price  DOUBLE,
+    low_price   DOUBLE,
+    close_price DOUBLE,
+    volume      DOUBLE,
+    turnover    DOUBLE,
+    PRIMARY KEY (thscode, date_ms)
 );
 CREATE TABLE IF NOT EXISTS snapshots (
     ts_ms   BIGINT NOT NULL,

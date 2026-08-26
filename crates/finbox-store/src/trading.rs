@@ -219,12 +219,17 @@ impl Db {
         Ok(v)
     }
 
-    /// 最近收盘价（日 K 最新一根），用于昨收。无记录返回 `Ok(None)`。
+    /// 昨结算价（涨跌停基准）：优先快照 prev_price（除权日会调整为除权后基准），
+    /// 无快照回退日 K 最新收盘。无记录返回 `Ok(None)`。
     pub fn prev_close(&self, thscode: &str) -> Result<Option<f64>> {
         let v = self.conn.query_row(
-            "SELECT (SELECT close_price FROM daily_bars WHERE thscode = ?
-                     ORDER BY date_ms DESC LIMIT 1)",
-            duckdb::params![thscode],
+            "SELECT COALESCE(
+                (SELECT prev_price FROM snapshots WHERE thscode = ? AND prev_price > 0
+                 ORDER BY ts_ms DESC LIMIT 1),
+                (SELECT close_price FROM daily_bars WHERE thscode = ?
+                 ORDER BY date_ms DESC LIMIT 1)
+             )",
+            duckdb::params![thscode, thscode],
             |r| r.get::<_, Option<f64>>(0),
         )?;
         Ok(v)

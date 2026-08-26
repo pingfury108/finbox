@@ -52,10 +52,19 @@ impl Db {
 
     /// 单只股票近 `n` 根日 K（时间正序）。
     pub fn recent_bars(&self, thscode: &str, n: u32) -> Result<Vec<RecentBar>> {
+        // 前复权优先；复权表未覆盖（重建中）时回退原始日K
+        let mut bars = self.query_bars("adj_daily_bars", thscode, n)?;
+        if bars.is_empty() {
+            bars = self.query_bars("daily_bars", thscode, n)?;
+        }
+        Ok(bars)
+    }
+
+    fn query_bars(&self, table: &str, thscode: &str, n: u32) -> Result<Vec<RecentBar>> {
         let mut stmt = self.conn.prepare(
-            "SELECT date_ms, open_price, high_price, low_price, close_price, volume
-             FROM daily_bars WHERE thscode = ?
-             ORDER BY date_ms DESC LIMIT ?",
+            &format!("SELECT date_ms, open_price, high_price, low_price, close_price, volume
+             FROM {table} WHERE thscode = ?
+             ORDER BY date_ms DESC LIMIT ?"),
         )?;
         let mut rows = stmt.query(duckdb::params![thscode, n as i64])?;
         let mut bars: Vec<RecentBar> = Vec::new();
@@ -113,12 +122,14 @@ impl Db {
     ///
     /// 对每只股票返回：最新快照价/涨幅/成交额 + MA20/MA60/60日高低点位置/近5日涨幅/量比。
     pub fn market_screen_rows(&self) -> Result<Vec<ScreenRow>> {
+        // 前复权优先；复权表为空（重建中）时回退原始日K
+        let table = if self.adj_bars_empty().unwrap_or(true) { "daily_bars" } else { "adj_daily_bars" };
         let mut stmt = self.conn.prepare(
-            r#"WITH ranked AS (
+            &format!(r#"WITH ranked AS (
                 SELECT thscode, date_ms, close_price, high_price, low_price, volume, turnover,
                        ROW_NUMBER() OVER (PARTITION BY thscode ORDER BY date_ms DESC) AS rn,
                        COUNT(*)  OVER (PARTITION BY thscode) AS total_bars
-                FROM daily_bars
+                FROM {table}
             ),
             per AS (
                 SELECT thscode,
@@ -145,7 +156,7 @@ impl Db {
                 FROM snapshots
                 QUALIFY ROW_NUMBER() OVER (PARTITION BY thscode ORDER BY ts_ms DESC) = 1
             ) s ON p.thscode = s.thscode
-            WHERE p.total_bars >= 60 AND p.last_close IS NOT NULL"#,
+            WHERE p.total_bars >= 60 AND p.last_close IS NOT NULL"#),
         )?;
         let mut rows = stmt.query([])?;
         let mut out = Vec::new();
@@ -236,7 +247,7 @@ impl Db {
             "WITH ranked AS (
                  SELECT thscode, date_ms, turnover,
                         ROW_NUMBER() OVER (PARTITION BY thscode ORDER BY date_ms DESC) AS rn
-                 FROM daily_bars
+                 FROM adj_daily_bars
              ),
              avg5 AS (
                  SELECT thscode, AVG(turnover) AS avg_turnover

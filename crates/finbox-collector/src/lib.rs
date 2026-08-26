@@ -117,6 +117,43 @@ impl Collector {
         }
     }
 
+    /// 前复权表全量重建（首次/修复用）。逐票计算，带进度日志。
+    pub async fn rebuild_adj_all(&self) -> Result<u64> {
+        let codes: Vec<String> = {
+            let db = self.db.lock().unwrap();
+            let mut stmt = db.conn().prepare("SELECT DISTINCT thscode FROM daily_bars")?;
+            let mut rows = stmt.query([])?;
+            let mut v = Vec::new();
+            while let Some(r) = rows.next()? {
+                v.push(r.get(0)?);
+            }
+            v
+        };
+        let total_codes = codes.len();
+        info!("[数据] 前复权全量重建开始: {total_codes} 只标的");
+        let mut total = 0u64;
+        for (i, code) in codes.iter().enumerate() {
+            // 每 200 只打印进度；锁粒度放小避免长时间阻塞
+            let n = {
+                let db = self.db.lock().unwrap();
+                db.rebuild_adj_bars_for(code)?
+            };
+            total += n;
+            if (i + 1) % 200 == 0 {
+                info!("[数据] 前复权重建进度: {}/{}", i + 1, total_codes);
+            }
+        }
+        info!("[数据] 前复权全量重建完成: {total} 行");
+        Ok(total)
+    }
+
+    /// 每日前复权增量（收盘后调用）。
+    pub async fn adj_daily_update(&self, today_ms: i64) -> Result<u64> {
+        let n = self.db.lock().unwrap().adj_bars_daily_update(today_ms)?;
+        info!("[数据] 前复权日K增量: {n} 行");
+        Ok(n)
+    }
+
     /// 采集几大 A 股指数日 K（复用 daily_bars 表，thscode 天然区分个股/指数）。
     /// 返回写入行数。
     pub async fn sync_index_bars(&self, days: u32) -> Result<u64> {
