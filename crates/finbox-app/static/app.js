@@ -19,6 +19,60 @@
     if (!r.ok) throw new Error(url + ' -> ' + r.status);
     return r.json();
   }
+
+  // 模态对话框（替代原生 alert/prompt/confirm）
+  // opts: { title, desc, inputs: [{key,label,placeholder,type}], confirmText, danger, requireText }
+  function showModal(opts) {
+    return new Promise(resolve => {
+      const mask = document.createElement('div');
+      mask.className = 'modal-mask';
+      const inputs = (opts.inputs || []).map(i =>
+        '<label>' + esc(i.label) + '<input data-key="' + i.key + '" type="' + (i.type || 'text') +
+        '" placeholder="' + esc(i.placeholder || '') + '"></label>'
+      ).join('');
+      mask.innerHTML =
+        '<div class="modal"><h3>' + esc(opts.title) + '</h3>' +
+        (opts.desc ? '<div class="modal-desc">' + opts.desc + '</div>' : '') +
+        inputs +
+        '<div class="modal-err" style="display:none"></div>' +
+        '<div class="modal-ops"><button class="btn-cancel">取消</button>' +
+        '<button class="btn-danger modal-ok">' + esc(opts.confirmText || '确认') + '</button></div></div>';
+      document.body.appendChild(mask);
+      const close = val => { mask.remove(); resolve(val); };
+      mask.querySelector('.btn-cancel').addEventListener('click', () => close(null));
+      mask.addEventListener('click', e => { if (e.target === mask) close(null); });
+      const okBtn = mask.querySelector('.modal-ok');
+      const errEl = mask.querySelector('.modal-err');
+      okBtn.addEventListener('click', async () => {
+        const values = {};
+        mask.querySelectorAll('input').forEach(inp => { values[inp.dataset.key] = inp.value; });
+        // 需要输入确认文本（如账户名）时校验
+        if (opts.requireText) {
+          const v = Object.values(values)[0] || '';
+          if (v !== opts.requireText) {
+            errEl.textContent = '请输入「' + opts.requireText + '」确认';
+            errEl.style.display = '';
+            return;
+          }
+        }
+        if (opts.onConfirm) {
+          okBtn.disabled = true;
+          try {
+            await opts.onConfirm(values);
+            close(values);
+          } catch (e) {
+            okBtn.disabled = false;
+            errEl.textContent = String(e.message || e);
+            errEl.style.display = '';
+          }
+        } else {
+          close(values);
+        }
+      });
+      const first = mask.querySelector('input');
+      if (first) first.focus();
+    });
+  }
   function fmtTime(ms) {
     return new Date(ms).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
   }
@@ -119,15 +173,23 @@
         '</div></div>';
     }).join('');
 
-    // 删除
+    // 删除（模态框确认）
     grid.querySelectorAll('.del-btn').forEach(b => {
-      b.addEventListener('click', async () => {
+      b.addEventListener('click', () => {
         const name = b.dataset.name;
-        if (!confirm('确定删除账户「' + name + '」？其全部资金/持仓/记录将永久删除！')) return;
-        try {
-          await fetch('/api/account/' + encodeURIComponent(name), { method: 'DELETE' });
-          location.reload();
-        } catch (e) { alert('删除失败：' + e); }
+        showModal({
+          title: '删除账户「' + name + '」',
+          desc: '其全部资金、持仓、记录将永久删除！此操作不可恢复。',
+          inputs: [{ key: 'confirm', label: '输入账户名确认', placeholder: name }],
+          confirmText: '永久删除',
+          requireText: name,
+          onConfirm: async () => {
+            const r = await fetch('/api/account/' + encodeURIComponent(name), { method: 'DELETE' });
+            if (r.status === 401) throw new Error('需要管理口令，请先到设置页验证');
+            if (!r.ok) throw new Error('删除失败: ' + r.status);
+            location.reload();
+          },
+        });
       });
     });
 
@@ -264,26 +326,31 @@
       renderDecisions(name),
     ]);
 
-    // 重置账户（危险区）
+    // 重置账户（危险区）：模态框确认
     const resetBtn = document.getElementById('btn-reset-acct');
     if (resetBtn) {
-      resetBtn.addEventListener('click', async () => {
-        const input = prompt('重置「' + name + '」将清除全部持仓/成交/决策记录！\n输入账户名「' + name + '」确认：');
-        if (input !== name) { if (input !== null) alert('账户名不匹配，已取消'); return; }
-        const capStr = prompt('新初始资金（元），留空保持当前：', '');
-        if (capStr === null) return;
-        const body = { initial_capital: capStr.trim() ? Number(capStr) : null };
-        try {
-          const r = await fetch('/api/account/' + encodeURIComponent(name) + '/reset', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          });
-          if (r.status === 401) { alert('需要管理口令，请先到设置页验证'); return; }
-          if (!r.ok) throw new Error(await r.text());
-          alert('已重置，重新开始模拟');
-          location.reload();
-        } catch (e) { alert('重置失败：' + e); }
+      resetBtn.addEventListener('click', () => {
+        showModal({
+          title: '重置「' + name + '」',
+          desc: '将清除该账户的全部持仓、成交、决策与复盘记录，资金恢复初始值。<br>此操作不可恢复。',
+          inputs: [
+            { key: 'capital', label: '新初始资金（元），留空保持当前', placeholder: '如 100000', type: 'number' },
+            { key: 'confirm', label: '输入账户名确认', placeholder: name },
+          ],
+          confirmText: '确认重置',
+          requireText: name,
+          onConfirm: async (values) => {
+            const body = { initial_capital: values.capital && values.capital.trim() ? Number(values.capital) : null };
+            const r = await fetch('/api/account/' + encodeURIComponent(name) + '/reset', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+            if (r.status === 401) throw new Error('需要管理口令，请先到设置页验证');
+            if (!r.ok) throw new Error('重置失败: ' + r.status);
+            location.reload();
+          },
+        });
       });
     }
 

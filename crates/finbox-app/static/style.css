@@ -318,6 +318,39 @@ a:hover { text-decoration: underline; }
 }
 .btn-danger:hover { background: #f6465d1a; }
 
+/* 模态对话框 */
+.modal-mask {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(0,0,0,0.6); backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center;
+  animation: fadeIn .15s ease-out;
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+.modal {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 12px; padding: 24px; width: 420px; max-width: 92vw;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+  animation: slideUp .18s ease-out;
+}
+@keyframes slideUp { from { transform: translateY(12px); opacity: 0; } to { transform: none; opacity: 1; } }
+.modal h3 { font-size: 16px; margin-bottom: 10px; }
+.modal .modal-desc { color: var(--muted); font-size: 13px; margin-bottom: 16px; line-height: 1.6; }
+.modal label { display: block; color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+.modal input {
+  display: block; width: 100%; margin-top: 4px; padding: 9px 12px;
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; font-size: 14px;
+}
+.modal input:focus { border-color: var(--accent); outline: none; }
+.modal .modal-ops { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+.modal .btn-cancel {
+  padding: 9px 18px; border-radius: 6px; cursor: pointer; font-size: 14px;
+  background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+}
+.modal .btn-cancel:hover { border-color: var(--muted); }
+.modal .btn-danger:disabled { opacity: 0.4; cursor: not-allowed; }
+.modal .modal-err { color: var(--up); font-size: 13px; margin-top: 10px; }
+
 /* ================= 移动端适配（≤768px） ================= */
 @media (max-width: 768px) {
   body { font-size: 15px; }
