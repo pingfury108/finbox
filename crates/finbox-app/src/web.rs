@@ -52,15 +52,15 @@ impl Clone for WebState {
 }
 
 impl WebState {
-    pub fn new(cfg: &Config) -> anyhow::Result<Self> {
-        let market = accounts::open_market(&cfg.data_dir)?;
+    /// market 必须传入调度器的共享连接（同进程另开 DuckDB 实例互不可见）。
+    pub fn new(cfg: &Config, market: finbox_store::SharedDb) -> anyhow::Result<Self> {
         Ok(Self { cfg: cfg.clone(), market })
     }
 }
 
-/// 启动 Web 服务（供 `run` 同进程调用或独立启动）。
-pub async fn serve(cfg: &Config, bind: &str) -> anyhow::Result<()> {
-    let state = WebState::new(cfg)?;
+/// 启动 Web 服务（供 `run` 同进程调用；market 为调度器共享连接）。
+pub async fn serve(cfg: &Config, bind: &str, market: finbox_store::SharedDb) -> anyhow::Result<()> {
+    let state = WebState::new(cfg, market)?;
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     log::info!("Web 界面已启动: http://{bind}");

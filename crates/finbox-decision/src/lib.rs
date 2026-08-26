@@ -128,9 +128,15 @@ impl DecisionEngine {
 
         let mut intents = llm::to_intents(&parsed.actions);
         let log = self.log_decision(&ctx, &raw, &parsed.actions_json, "parsed", &parsed.comment);
-        // 决策与成交关联：意图带上决策日志 id
-        for i in intents.iter_mut() {
-            i.decision_id = Some(log);
+        // 决策与成交关联：意图带上决策日志 id；名称从行情库补全（LLM 输出只有代码）
+        {
+            let m = self.market.lock().unwrap();
+            for i in intents.iter_mut() {
+                i.decision_id = Some(log);
+                if i.name.is_empty() {
+                    i.name = m.ticker_name(&i.thscode).unwrap_or_else(|_| i.thscode.clone());
+                }
+            }
         }
         info!("AI 决策完成: 状态={} 意图{}条 comment={}", "parsed", intents.len(), parsed.comment);
         for i in &intents {

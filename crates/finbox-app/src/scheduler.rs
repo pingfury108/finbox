@@ -73,10 +73,12 @@ impl Scheduler {
         let mut handles = Vec::new();
 
         // Web 界面（同进程，端口用环境变量 FINBOX_BIND，默认 0.0.0.0:8000）
+        // market 传共享连接：同进程另开 DuckDB 实例与采集端互不可见
         let cfg_web = self.cfg.clone();
+        let market_web = self.market.clone();
         handles.push(tokio::spawn(async move {
             let bind = std::env::var("FINBOX_BIND").unwrap_or_else(|_| "0.0.0.0:8000".into());
-            crate::web::serve(&cfg_web, &bind).await.map_err(|e| anyhow::anyhow!("Web: {e}"))
+            crate::web::serve(&cfg_web, &bind, market_web).await.map_err(|e| anyhow::anyhow!("Web: {e}"))
         }));
 
         // 账户监督任务：定期扫描，动态发现新账户/删除账户
@@ -189,25 +191,6 @@ impl Scheduler {
         }
         Ok(())
     }
-}
-
-/// 构建某账户的决策引擎（手动 decide 用）。
-pub fn build_decision_engine(
-    cfg: &Config,
-    market: SharedDb,
-    acct: SharedDb,
-) -> DecisionEngine {
-    let conf = read_acct_conf(cfg, &acct);
-    DecisionEngine::new(
-        market,
-        acct,
-        LlmConfig {
-            base_url: cfg.llm_base_url.clone(),
-            api_key: cfg.llm_api_key.clone(),
-            model: cfg.llm_model.clone(),
-        },
-        conf.watchlist,
-    )
 }
 
 fn build_account_ctx(
