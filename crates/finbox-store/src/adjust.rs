@@ -127,10 +127,15 @@ impl Db {
         Ok(total + n as u64)
     }
 
-    /// 前复权表是否为空（判断是否需要全量重建）。
-    pub fn adj_bars_empty(&self) -> Result<bool> {
-        let v: i64 = self.conn.query_row("SELECT COUNT(*) FROM adj_daily_bars", [], |r| r.get(0))?;
-        Ok(v == 0)
+    /// 前复权表覆盖度检查：`true` = 需要重建（为空或覆盖不全——中断后部分填充也要补完）。
+    pub fn adj_bars_incomplete(&self) -> Result<bool> {
+        let (adj, raw): (i64, i64) = self.conn.query_row(
+            "SELECT (SELECT COUNT(DISTINCT thscode) FROM adj_daily_bars),
+                    (SELECT COUNT(DISTINCT thscode) FROM daily_bars)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(adj < raw)
     }
 }
 

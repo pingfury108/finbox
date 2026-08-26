@@ -536,6 +536,22 @@ impl Db {
         Ok(())
     }
 
+    /// 重置账户：清除全部模拟数据（持仓/成交/决策/复盘/快照/除权标记/风控状态），
+    /// 现金与初始资金重置为指定值。保留 meta 中的账户配置（自选池/决策间隔等）。
+    pub fn reset_account(&self, initial_capital: f64) -> Result<()> {
+        self.conn.execute_batch(&format!(
+            "DELETE FROM positions;
+             DELETE FROM trades;
+             DELETE FROM decision_logs;
+             DELETE FROM reviews;
+             DELETE FROM account_snapshots;
+             DELETE FROM processed_adjustments;
+             UPDATE account SET cash = {initial_capital}, initial_capital = {initial_capital} WHERE id = 1;
+             DELETE FROM meta WHERE key IN ('peak_asset', 'fuse_until_ms');"
+        ))?;
+        Ok(())
+    }
+
     /// 某标的最早买入时间（红利税持有期计算用；无买入记录返回 None）。
     pub fn first_buy_ms(&self, thscode: &str) -> Result<Option<i64>> {
         let v: Option<i64> = self.conn.query_row(

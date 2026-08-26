@@ -281,6 +281,34 @@ pub async fn recent_decisions(State(st): State<WebState>) -> Json<Vec<DecisionFe
     Json(all)
 }
 
+/// 重置账户表单。
+#[derive(serde::Deserialize)]
+pub struct ResetForm {
+    /// 新初始资金（可选，缺省保持当前值）
+    pub initial_capital: Option<f64>,
+}
+
+/// 重置账户：清除全部模拟数据，资金恢复初始值（admin 保护）。
+pub async fn reset_account(
+    State(st): State<WebState>,
+    Path(name): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(form): Json<ResetForm>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    if !crate::web::admin_ok(&st.cfg, &headers) {
+        return Err(axum::http::StatusCode::UNAUTHORIZED);
+    }
+    let acct = accounts::open_account(&st.cfg.data_dir, &name).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+    let db = acct.lock().unwrap();
+    let capital = match form.initial_capital.filter(|v| *v > 0.0) {
+        Some(v) => v,
+        None => db.get_or_init_account(st.cfg.initial_capital).map(|a| a.initial_capital).unwrap_or(st.cfg.initial_capital),
+    };
+    db.reset_account(capital).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    log::info!("[账户] 「{name}」已重置，初始资金 {capital:.0}");
+    Ok(Json(serde_json::json!({ "ok": true, "initial_capital": capital })))
+}
+
 /// 删除账户（含其全部数据）。
 pub async fn delete_account(
     State(st): State<WebState>,

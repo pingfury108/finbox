@@ -142,6 +142,10 @@ impl Collector {
             if (i + 1) % 200 == 0 {
                 info!("[数据] 前复权重建进度: {}/{}", i + 1, total_codes);
             }
+            // 每批让出时间片：防锁轰炸导致 Web 饿死（上轮事故）
+            if (i + 1) % 50 == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
         }
         info!("[数据] 前复权全量重建完成: {total} 行");
         Ok(total)

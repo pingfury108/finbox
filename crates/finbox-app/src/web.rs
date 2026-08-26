@@ -94,6 +94,7 @@ pub fn router(state: WebState) -> Router {
         .route("/api/account/{name}/decision/{id}/trades", get(api::decision_trades))
         .route("/api/accounts/equity-all", get(api::accounts_equity_all))
         .route("/api/account/{name}", axum::routing::delete(api::delete_account))
+        .route("/api/account/{name}/reset", post(api::reset_account))
         // 静态资源（编译期嵌入）
         .route("/static/{file}", get(static_file))
         .with_state(state)
@@ -189,7 +190,14 @@ async fn account_page(State(st): State<WebState>, axum::extract::Path(name): axu
 </div>
 <div class="tab-pane" id="tab-positions"></div>
 <div class="tab-pane" id="tab-trades" style="display:none"></div>
-<div class="tab-pane" id="tab-decisions" style="display:none"></div>"#, name = name_esc);
+<div class="tab-pane" id="tab-decisions" style="display:none"></div>
+<div class="panel danger-zone">
+  <h2>危险区</h2>
+  <div class="danger-ops">
+    <button class="btn-danger" id="btn-reset-acct">重置账户</button>
+    <span class="hint">清除全部模拟数据（持仓/成交/决策记录），资金恢复初始值，重新开始模拟</span>
+  </div>
+</div>"#, name = name_esc);
     layout(&format!("{name} · 账户"), "account", &body)
 }
 

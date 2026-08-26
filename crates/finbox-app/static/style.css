@@ -308,6 +308,16 @@ a:hover { text-decoration: underline; }
 .today-events .ev-ok b { color: var(--up); }
 .today-events .ev-warn b { color: var(--accent2); }
 
+/* 危险区 */
+.danger-zone { border-left: 3px solid var(--up); }
+.danger-ops { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.btn-danger {
+  padding: 9px 20px; border-radius: 6px; cursor: pointer; font-size: 14px;
+  background: transparent; color: var(--up); border: 1px solid var(--up);
+  transition: all .15s;
+}
+.btn-danger:hover { background: #f6465d1a; }
+
 /* ================= 移动端适配（≤768px） ================= */
 @media (max-width: 768px) {
   body { font-size: 15px; }

@@ -71,7 +71,7 @@ impl Scheduler {
         }
 
         // 前复权表自检：为空（新表首次）则后台全量重建（不阻塞启动）
-        if self.market.lock().unwrap().adj_bars_empty().unwrap_or(false) {
+        if self.market.lock().unwrap().adj_bars_incomplete().unwrap_or(false) {
             let collector = finbox_collector::Collector::new(
                 hithink_sdk::Client::new(self.cfg.hithink_api_key.clone())?,
                 self.market.clone(),

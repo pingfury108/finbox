@@ -264,6 +264,29 @@
       renderDecisions(name),
     ]);
 
+    // 重置账户（危险区）
+    const resetBtn = document.getElementById('btn-reset-acct');
+    if (resetBtn) {
+      resetBtn.addEventListener('click', async () => {
+        const input = prompt('重置「' + name + '」将清除全部持仓/成交/决策记录！\n输入账户名「' + name + '」确认：');
+        if (input !== name) { if (input !== null) alert('账户名不匹配，已取消'); return; }
+        const capStr = prompt('新初始资金（元），留空保持当前：', '');
+        if (capStr === null) return;
+        const body = { initial_capital: capStr.trim() ? Number(capStr) : null };
+        try {
+          const r = await fetch('/api/account/' + encodeURIComponent(name) + '/reset', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          if (r.status === 401) { alert('需要管理口令，请先到设置页验证'); return; }
+          if (!r.ok) throw new Error(await r.text());
+          alert('已重置，重新开始模拟');
+          location.reload();
+        } catch (e) { alert('重置失败：' + e); }
+      });
+    }
+
     function card(label, value, vcls) {
       return '<div class="card"><div class="label">' + label + '</div>' +
         '<div class="value ' + (vcls || '') + '">' + value + '</div></div>';

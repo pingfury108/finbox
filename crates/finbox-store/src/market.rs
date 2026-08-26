@@ -123,7 +123,7 @@ impl Db {
     /// 对每只股票返回：最新快照价/涨幅/成交额 + MA20/MA60/60日高低点位置/近5日涨幅/量比。
     pub fn market_screen_rows(&self) -> Result<Vec<ScreenRow>> {
         // 前复权优先；复权表为空（重建中）时回退原始日K
-        let table = if self.adj_bars_empty().unwrap_or(true) { "daily_bars" } else { "adj_daily_bars" };
+        let table = if self.adj_bars_incomplete().unwrap_or(true) { "daily_bars" } else { "adj_daily_bars" };
         let mut stmt = self.conn.prepare(
             &format!(r#"WITH ranked AS (
                 SELECT thscode, date_ms, close_price, high_price, low_price, volume, turnover,
