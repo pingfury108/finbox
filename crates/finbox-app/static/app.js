@@ -8,9 +8,14 @@
     d = d || 2;
     return Number(n).toFixed(d);
   }
-  function cls(v) { return v >= 0 ? 'up' : 'down'; }
+  function cls(v) { return v > 0 ? 'up' : v < 0 ? 'down' : ''; }
   function sign(v) { return v > 0 ? '+' : ''; }
   function pct(v) { return v === null || v === undefined ? '-' : sign(v) + fmt(v) + '%'; }
+  // 金额千分位（¥80,000）
+  function money(n) {
+    if (n === null || n === undefined || isNaN(n)) return '-';
+    return Number(n).toLocaleString('zh-CN', { maximumFractionDigits: 0 });
+  }
   function esc(s) {
     return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
@@ -127,8 +132,8 @@
     const range = max - min || 1;
     const step = w / (data.length - 1);
     const pts = data.map((v, i) => (i * step).toFixed(1) + ',' + (h - (v - min) / range * (h - 4) - 2).toFixed(1)).join(' ');
-    const up = data[data.length - 1] >= data[0];
-    const color = up ? 'var(--up)' : 'var(--down)';
+    const last = data[data.length - 1], first = data[0];
+    const color = last > first ? 'var(--up)' : last < first ? 'var(--down)' : 'var(--muted)';
     return '<svg width="' + w + '" height="' + h + '" style="display:block">' +
       '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.5"/></svg>';
   }
@@ -146,8 +151,8 @@
       const todaySum = accts.reduce((s, a) => s + a.today_pnl, 0);
       const retSum = accts.length ? accts.reduce((s, a) => s + a.return_pct, 0) / accts.length : 0;
       ovCards.innerHTML =
-        ovCard('总资产', '¥' + fmt(totalSum, 0), '') +
-        ovCard('今日盈亏', sign(todaySum) + fmt(todaySum, 0), cls(todaySum)) +
+        ovCard('总资产', '¥' + money(totalSum), '') +
+        ovCard('今日盈亏', sign(todaySum) + money(todaySum), cls(todaySum)) +
         ovCard('平均收益率', pct(retSum), cls(retSum));
     }
 
@@ -162,36 +167,16 @@
       const rp = a.return_pct;
       return '<div class="acct-card">' +
         '<div class="acct-card-name">' + esc(a.name) + '</div>' +
-        '<div class="acct-card-total">¥' + fmt(a.total, 0) + '</div>' +
-        '<div class="acct-card-today">今日 <span class="' + cls(a.today_pnl) + '">' + sign(a.today_pnl) + fmt(a.today_pnl, 0) + '</span>' +
+        '<div class="acct-card-total">¥' + money(a.total) + '</div>' +
+        '<div class="acct-card-today">今日 <span class="' + cls(a.today_pnl) + '">' + sign(a.today_pnl) + money(a.today_pnl) + '</span>' +
         ' · 收益率 <span class="' + cls(rp) + '">' + pct(rp) + '</span></div>' +
-        (a.sparkline && a.sparkline.length > 1 ? '<div class="acct-card-spark">' + sparklineSvg(a.sparkline, 180, 36) + '</div>' : '') +
-        '<div class="acct-card-row">持仓 ' + a.position_count + ' 只 · 现金 ¥' + fmt(a.cash, 0) + '</div>' +
+        '<div class="acct-card-spark">' + (a.sparkline && a.sparkline.length > 1 ? sparklineSvg(a.sparkline, 180, 36) : '') + '</div>' +
+        '<div class="acct-card-row">持仓 ' + a.position_count + ' 只 · 现金 ¥' + money(a.cash) + '</div>' +
         '<div class="acct-card-ops">' +
           '<a class="btn-ghost" href="/account/' + encodeURIComponent(a.name) + '">查看</a>' +
-          '<button class="del-btn" data-name="' + esc(a.name) + '">删除</button>' +
         '</div></div>';
     }).join('');
 
-    // 删除（模态框确认）
-    grid.querySelectorAll('.del-btn').forEach(b => {
-      b.addEventListener('click', () => {
-        const name = b.dataset.name;
-        showModal({
-          title: '删除账户「' + name + '」',
-          desc: '其全部资金、持仓、记录将永久删除！此操作不可恢复。',
-          inputs: [{ key: 'confirm', label: '输入账户名确认', placeholder: name }],
-          confirmText: '永久删除',
-          requireText: name,
-          onConfirm: async () => {
-            const r = await fetch('/api/account/' + encodeURIComponent(name), { method: 'DELETE' });
-            if (r.status === 401) throw new Error('需要管理口令，请先到设置页验证');
-            if (!r.ok) throw new Error('删除失败: ' + r.status);
-            location.reload();
-          },
-        });
-      });
-    });
 
     // 今日决策动态
     renderDecisionFeed();
@@ -291,11 +276,11 @@
     if (acct) {
       const posPct = acct.total > 0 ? (acct.market_value / acct.total * 100) : 0;
       cards.innerHTML = [
-        card('总资产', '¥' + fmt(acct.total, 0)),
-        card('今日盈亏', sign(acct.today_pnl) + fmt(acct.today_pnl, 0), cls(acct.today_pnl)),
+        card('总资产', '¥' + money(acct.total)),
+        card('今日盈亏', sign(acct.today_pnl) + money(acct.today_pnl), cls(acct.today_pnl)),
         card('累计收益', pct(acct.return_pct), cls(acct.return_pct)),
-        card('可用现金', '¥' + fmt(acct.cash, 0)),
-        card('持仓市值', '¥' + fmt(acct.market_value, 0)),
+        card('可用现金', '¥' + money(acct.cash)),
+        card('持仓市值', '¥' + money(acct.market_value)),
         card('仓位', fmt(posPct, 1) + '%', posPct > 60 ? 'up' : ''),
       ].join('');
     }
@@ -325,6 +310,26 @@
       renderTrades(name),
       renderDecisions(name),
     ]);
+
+    // 删除账户（危险区）：模态框确认
+    const deleteBtn = document.getElementById('btn-delete-acct');
+    if (deleteBtn) {
+      deleteBtn.addEventListener('click', () => {
+        showModal({
+          title: '删除账户「' + name + '」',
+          desc: '其全部资金、持仓、记录将永久删除！此操作不可恢复。',
+          inputs: [{ key: 'confirm', label: '输入账户名确认', placeholder: name }],
+          confirmText: '永久删除',
+          requireText: name,
+          onConfirm: async () => {
+            const r = await fetch('/api/account/' + encodeURIComponent(name), { method: 'DELETE' });
+            if (r.status === 401) throw new Error('需要管理口令，请先到设置页验证');
+            if (!r.ok) throw new Error('删除失败: ' + r.status);
+            location.href = '/';
+          },
+        });
+      });
+    }
 
     // 重置账户（危险区）：模态框确认
     const resetBtn = document.getElementById('btn-reset-acct');

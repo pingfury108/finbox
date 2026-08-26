@@ -197,6 +197,10 @@ async fn account_page(State(st): State<WebState>, axum::extract::Path(name): axu
     <button class="btn-danger" id="btn-reset-acct">重置账户</button>
     <span class="hint">清除全部模拟数据（持仓/成交/决策记录），资金恢复初始值，重新开始模拟</span>
   </div>
+  <div class="danger-ops" style="margin-top:12px">
+    <button class="btn-danger" id="btn-delete-acct">删除账户</button>
+    <span class="hint">永久删除该账户及其全部数据，不可恢复</span>
+  </div>
 </div>"#, name = name_esc);
     layout(&format!("{name} · 账户"), "account", &body)
 }
