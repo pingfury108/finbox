@@ -14,8 +14,9 @@
 
 use chrono::{Datelike, Local, Timelike};
 use finbox_core::rules::{
-    is_trading_time, limit_down_price, limit_up_price, round_price, COMMISSION_MIN,
-    COMMISSION_RATE, LOT_SIZE, STAMP_RATE, TRANSFER_RATE,
+    board_allowed, is_trading_time, is_valid_buy_quantity, is_valid_sell_quantity,
+    limit_down_price, limit_up_price, round_price, COMMISSION_MIN, COMMISSION_RATE,
+    STAMP_RATE, TRANSFER_RATE,
 };
 use finbox_core::{Account, Execution, OrderIntent, OrderSide, Position, RejectReason, Trade};
 use finbox_store::SharedDb;
@@ -42,7 +43,13 @@ impl Broker for SimBroker {
         let (price, prev_close) = {
             let m = self.market.lock().unwrap();
             let price = market_price(&m, &intent.thscode)?;
-            let prev = m.prev_close(&intent.thscode).map_err(BrokerError::Store)?;
+            // 新股上市前 5 个交易日无涨跌幅限制：不做涨跌停拦截
+            let is_new = m.days_since_first_bar(&intent.thscode).ok().flatten().map(|d| d < 5).unwrap_or(false);
+            let prev = if is_new {
+                None
+            } else {
+                m.prev_close(&intent.thscode).map_err(BrokerError::Store)?
+            };
             (price, prev)
         };
         let mut acct = self.acct.lock().unwrap();
@@ -93,11 +100,15 @@ fn buy(
     initial_capital: f64,
 ) -> Result<Execution, RejectReason> {
     check_trading_time()?;
-    if intent.quantity <= 0 || intent.quantity % LOT_SIZE != 0 {
-        return Err(RejectReason::LotSize(LOT_SIZE));
+    if !is_valid_buy_quantity(&intent.thscode, intent.quantity) {
+        return Err(RejectReason::LotSize(intent.quantity));
+    }
+    // 板块资金权限（按初始资金，对应真实开通权限时点）
+    if !board_allowed(initial_capital, &intent.thscode) {
+        return Err(RejectReason::BoardNotAllowed(intent.thscode.clone()));
     }
     if let Some(prev) = prev_close {
-        let limit_up = limit_up_price(prev, &intent.thscode);
+        let limit_up = limit_up_price(prev, &intent.thscode, &intent.name);
         if price >= limit_up {
             return Err(RejectReason::LimitUp(intent.thscode.clone()));
         }
@@ -182,9 +193,6 @@ fn sell(
     initial_capital: f64,
 ) -> Result<Execution, RejectReason> {
     check_trading_time()?;
-    if intent.quantity <= 0 || intent.quantity % LOT_SIZE != 0 {
-        return Err(RejectReason::LotSize(LOT_SIZE));
-    }
 
     let position = acct
         .position(&intent.thscode)
@@ -192,6 +200,10 @@ fn sell(
         .ok_or_else(|| RejectReason::InsufficientPosition(intent.thscode.clone(), 0))?;
     if position.quantity < intent.quantity {
         return Err(RejectReason::InsufficientPosition(intent.thscode.clone(), position.quantity));
+    }
+    // 整手卖出；零股（除权送股产生）须一次性清仓
+    if !is_valid_sell_quantity(&intent.thscode, intent.quantity, position.quantity) {
+        return Err(RejectReason::LotSize(intent.quantity));
     }
 
     // T+1：当日买入部分不可卖
@@ -205,7 +217,7 @@ fn sell(
     }
 
     if let Some(prev) = prev_close {
-        let limit_down = limit_down_price(prev, &intent.thscode);
+        let limit_down = limit_down_price(prev, &intent.thscode, &position.name);
         if price <= limit_down {
             return Err(RejectReason::LimitDown(intent.thscode.clone()));
         }

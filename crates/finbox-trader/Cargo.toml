@@ -13,3 +13,7 @@ chrono = "0.4"
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
+log = "0.4"
+
+[dev-dependencies]
+duckdb = { workspace = true }

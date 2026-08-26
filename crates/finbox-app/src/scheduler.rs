@@ -297,7 +297,10 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
     /// - 收盘 15:05：复盘 + 账户快照
     async fn run_account(&mut self) -> anyhow::Result<()> {
         log::info!("[{}] 账户任务启动，开始监控", self.name);
+        // 启动即应用待处理除权事件（分红/送股）
+        self.apply_adjustments();
         let mut last_decision_min = 0i64;
+        let mut last_adjust_date = String::new();
         // 固定决策时点（分钟）：开盘/午间/尾盘
         let fixed_points = [9 * 60 + 35, 11 * 60 + 25, 14 * 60 + 55];
         loop {
@@ -307,6 +310,12 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
             let min = now.timestamp() / 60;
 
             if weekday_iso < 6 {
+                // 每日首次进入工作日循环时应用除权（除权日开盘前生效）
+                let today = now.format("%Y-%m-%d").to_string();
+                if today != last_adjust_date && minute >= 9 * 60 {
+                    self.apply_adjustments();
+                    last_adjust_date = today;
+                }
                 // 盘中（9:30-15:00）
                 if minute >= 9 * 60 + 30 && minute < 15 * 60 {
                     // ① 风控实时监控（每 60s）：止损/止盈/超期 → 立即卖出
@@ -344,6 +353,24 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
             .flatten()
             .and_then(|s| s.parse().ok())
             .unwrap_or(30)
+    }
+
+    /// 应用持仓的除权除息事件（分红入账/送股摊薄成本）。
+    fn apply_adjustments(&self) {
+        let today_ms = chrono::Local::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .unwrap()
+            .timestamp_millis();
+        let acct = self.acct.lock().unwrap();
+        let m = self.market.lock().unwrap();
+        match finbox_trader::apply_pending_adjustments(&acct, &m, today_ms) {
+            Ok(0) => {}
+            Ok(n) => log::info!("[{}][除权] 应用 {} 个事件", self.name, n),
+            Err(e) => log::warn!("[{}][除权] 应用失败: {e}", self.name),
+        }
     }
 
     /// 盘中风控：止损/止盈/超期，触发生成卖出并执行。

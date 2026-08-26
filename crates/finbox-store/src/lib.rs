@@ -287,6 +287,12 @@ CREATE TABLE IF NOT EXISTS reviews (
     summary     VARCHAR,
     pnl         DOUBLE
 );
+CREATE TABLE IF NOT EXISTS processed_adjustments (
+    thscode    VARCHAR NOT NULL,
+    ex_date_ms BIGINT NOT NULL,
+    applied_ms BIGINT NOT NULL,
+    PRIMARY KEY (thscode, ex_date_ms)
+);
 "#;
 
 /// DuckDB 本地行情库。
@@ -295,6 +301,11 @@ pub struct Db {
 }
 
 impl Db {
+    /// 底层连接访问（测试/特殊批量操作用）。
+    pub fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
     /// 打开行情库（共享只读：tickers/日K/快照/交易日历/全局配置）。
     pub fn open_market(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_schema(path, MARKET_SCHEMA)
@@ -468,6 +479,68 @@ impl Db {
                 volume = excluded.volume, turnover = excluded.turnover"
         );
         Ok(self.conn.execute(&sql, [])? as u64)
+    }
+
+    /// 某标的截至 `until_ms` 的全部除权事件（分红/送股/配股）。
+    pub fn adjustments_for(&self, thscode: &str, until_ms: i64) -> Result<Vec<(i64, f64, f64, Option<f64>, Option<f64>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ex_date_ms, dividend_per_share, per_share_bonus, allotment_ratio, allotment_price
+             FROM adjustment_events WHERE thscode = ? AND ex_date_ms <= ? ORDER BY ex_date_ms",
+        )?;
+        let mut rows = stmt.query(duckdb::params![thscode, until_ms])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?));
+        }
+        Ok(out)
+    }
+
+    /// 除权事件是否已应用（账户库）。
+    pub fn is_adjustment_processed(&self, thscode: &str, ex_date_ms: i64) -> Result<bool> {
+        let v: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM processed_adjustments WHERE thscode = ? AND ex_date_ms = ?",
+            duckdb::params![thscode, ex_date_ms],
+            |r| r.get(0),
+        )?;
+        Ok(v > 0)
+    }
+
+    /// 标记除权事件已应用（账户库）。
+    pub fn mark_adjustment_processed(&self, thscode: &str, ex_date_ms: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO processed_adjustments VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+            duckdb::params![thscode, ex_date_ms, chrono::Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    /// 账户现金直接加记（除权分红入账用，不走成交）。
+    pub fn add_cash(&self, delta: f64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE account SET cash = cash + ? WHERE id = 1",
+            duckdb::params![delta],
+        )?;
+        Ok(())
+    }
+
+    /// 某标的最早买入时间（红利税持有期计算用；无买入记录返回 None）。
+    pub fn first_buy_ms(&self, thscode: &str) -> Result<Option<i64>> {
+        let v: Option<i64> = self.conn.query_row(
+            "SELECT MIN(ts_ms) FROM trades WHERE thscode = ? AND side = 'BUY'",
+            duckdb::params![thscode],
+            |r| r.get(0),
+        )?;
+        Ok(v)
+    }
+
+    /// 距上市天数（用库中首根日K近似；新股前 5 交易日无涨跌幅限制）。
+    pub fn days_since_first_bar(&self, thscode: &str) -> Result<Option<i64>> {
+        let v: Option<i64> = self.conn.query_row(
+            "SELECT MIN(date_ms) FROM daily_bars WHERE thscode = ?",
+            duckdb::params![thscode],
+            |r| r.get(0),
+        )?;
+        Ok(v.map(|first| (chrono::Utc::now().timestamp_millis() - first) / 86_400_000))
     }
 
     /// 导入全市场复权事件 Parquet，返回写入行数。

@@ -35,8 +35,10 @@ pub struct OrderIntent {
 pub enum RejectReason {
     #[error("非交易时段")]
     NotTradingTime,
-    #[error("数量须为 {0} 的整数倍")]
+    #[error("数量不符合板块整手规则（主板/创业板100股整手，科创板≥200股起）")]
     LotSize(u32),
+    #[error("账户资金不满足该板块权限要求: {0}")]
+    BoardNotAllowed(String),
     #[error("{0} 已涨停，禁止买入")]
     LimitUp(String),
     #[error("{0} 已跌停，禁止卖出")]

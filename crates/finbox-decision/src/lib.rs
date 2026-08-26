@@ -70,7 +70,19 @@ impl DecisionEngine {
     /// 执行一轮决策：初筛 → 上下文 → LLM → 意图。
     /// `candidate_count` 为初筛输出候选数（少而精，建议 3-5）。
     pub async fn decide(&self, candidate_count: usize) -> Result<DecisionResult, DecisionError> {
-        let candidates = self.cached_screen(candidate_count).await?;
+        let mut candidates = self.cached_screen(candidate_count).await?;
+        // 板块资金权限过滤：按账户初始资金剔除无权限板块（真实中根本开不了权限）
+        let initial = {
+            let a = self.acct.lock().unwrap();
+            a.get_or_init_account(0.0).map(|x| x.initial_capital).unwrap_or(0.0)
+        };
+        if initial > 0.0 {
+            let before = candidates.len();
+            candidates.retain(|c| finbox_core::rules::board_allowed(initial, &c.thscode));
+            if candidates.len() < before {
+                info!("板块权限过滤: {} → {} 只（初始资金 {:.0}万）", before, candidates.len(), initial / 10000.0);
+            }
+        }
         info!("初筛完成：{} 只候选", candidates.len());
         for c in &candidates {
             info!("  候选 {} {} 现价{:.2} 涨幅{:.2}% 评分{:.2}", c.thscode, c.name, c.price, c.pct, c.score);
