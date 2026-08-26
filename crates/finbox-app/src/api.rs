@@ -405,9 +405,15 @@ pub async fn positions(
             let price = m.latest_snapshot_price(&p.thscode).ok().flatten().unwrap_or(p.avg_cost);
             let pnl = (price - p.avg_cost) * p.quantity as f64;
             let pnl_pct = if p.avg_cost > 0.0 { (price / p.avg_cost - 1.0) * 100.0 } else { 0.0 };
+            // 历史遗留：早期买入时名称为空用了代码占位，读取时从行情库补全
+            let pname = if p.name.is_empty() || p.name == p.thscode {
+                m.ticker_name(&p.thscode).unwrap_or_else(|_| p.thscode.clone())
+            } else {
+                p.name.clone()
+            };
             out.push(PositionRow {
                 thscode: p.thscode.clone(),
-                name: p.name.clone(),
+                name: pname,
                 quantity: p.quantity,
                 avg_cost: p.avg_cost,
                 price,
@@ -440,19 +446,26 @@ pub async fn trades(
     Path(name): Path<String>,
 ) -> Result<Json<Vec<TradeRow>>, axum::http::StatusCode> {
     let acct = accounts::open_account(&st.cfg.data_dir, &name).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
-    let db = acct.lock().unwrap();
-    let rows = db.recent_trades(50).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
-    Ok(Json(rows.into_iter().map(|t| TradeRow {
+    let rows = acct.lock().unwrap().recent_trades(50).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+    let m = st.market.lock().unwrap();
+    Ok(Json(rows.into_iter().map(|t| {
+        // 历史遗留占位名称读取时补全
+        let tname = if t.name.is_empty() || t.name == t.thscode {
+            m.ticker_name(&t.thscode).unwrap_or_else(|_| t.thscode.clone())
+        } else {
+            t.name
+        };
+        TradeRow {
         ts_ms: t.ts_ms,
         thscode: t.thscode,
-        name: t.name,
+        name: tname,
         side: t.side.as_str().into(),
         quantity: t.quantity,
         price: t.price,
         amount: t.amount,
         fee: t.fee,
         decision_id: t.decision_id,
-    }).collect()))
+    }}).collect()))
 }
 
 /// 决策行。
