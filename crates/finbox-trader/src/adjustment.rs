@@ -26,9 +26,12 @@ pub fn apply_pending_adjustments(acct: &Db, market: &Db, today_ms: i64) -> finbo
     let positions = acct.positions()?;
     let mut applied = 0u32;
     for p in positions {
+        // 只应用持仓建立之后的除权事件：今日买入的票不适用历史事件
+        // （除权只影响除权日之前持有的股票）
+        let Some(first_buy) = acct.first_buy_ms(&p.thscode)? else { continue };
         let events = market.adjustments_for(&p.thscode, today_ms)?;
         for (ex_date, dividend, bonus, allot_ratio, _allot_price) in events {
-            if acct.is_adjustment_processed(&p.thscode, ex_date)? {
+            if ex_date <= first_buy || acct.is_adjustment_processed(&p.thscode, ex_date)? {
                 continue;
             }
             let mut qty = p.quantity;
@@ -95,7 +98,8 @@ mod tests {
     fn bonus_split_adjusts_position() {
         let market = open_market_shared(":memory:").unwrap();
         let acct = open_account_shared(":memory:").unwrap();
-        // 造一只持仓 + 一条送股事件（10送1）
+        let today = 1_800_000_000_000i64;
+        // 造一只持仓 + 一条买入记录 + 一条送股事件（10送1）
         {
             let a = acct.lock().unwrap();
             a.get_or_init_account(100_000.0).unwrap();
@@ -106,8 +110,18 @@ mod tests {
                 avg_cost: 1000.0,
             })
             .unwrap();
+            // 买入记录（除权前 10 天建仓）
+            a.insert_trade(&finbox_core::Trade {
+                thscode: "600519.SH".into(), name: "贵州茅台".into(),
+                side: finbox_core::OrderSide::Buy, price: 1000.0, quantity: 100,
+                amount: 100_000.0, fee: 30.0, decision_id: None,
+            }).unwrap();
+            // insert_trade 用当前时间；拨回 10 天前使除权事件晚于建仓
+            a.conn().execute(
+                "UPDATE trades SET ts_ms = ? WHERE thscode = '600519.SH'",
+                duckdb::params![today - 10 * 86_400_000],
+            ).unwrap();
         }
-        let today = 1_800_000_000_000i64;
         {
             let m = market.lock().unwrap();
             m.conn().execute(
@@ -131,5 +145,43 @@ mod tests {
             apply_pending_adjustments(&a, &m, today).unwrap()
         };
         assert_eq!(n2, 0);
+    }
+
+    #[test]
+    fn historical_events_not_applied_to_new_position() {
+        // 今天建仓的票，去年/上周的除权事件不应应用（只影响除权日前持有的股票）
+        let market = open_market_shared(":memory:").unwrap();
+        let acct = open_account_shared(":memory:").unwrap();
+        let today = 1_800_000_000_000i64;
+        {
+            let a = acct.lock().unwrap();
+            a.get_or_init_account(100_000.0).unwrap();
+            a.upsert_position(&finbox_core::Position {
+                thscode: "600519.SH".into(), name: "贵州茅台".into(),
+                quantity: 100, avg_cost: 1000.0,
+            }).unwrap();
+            // 买入时间 = 今天（first_buy 为当前）
+            a.insert_trade(&finbox_core::Trade {
+                thscode: "600519.SH".into(), name: "贵州茅台".into(),
+                side: finbox_core::OrderSide::Buy, price: 1000.0, quantity: 100,
+                amount: 100_000.0, fee: 30.0, decision_id: None,
+            }).unwrap();
+            // 买入时间拨到今天零点（与 today 一致）
+            a.conn().execute("UPDATE trades SET ts_ms = ? WHERE thscode = '600519.SH'", duckdb::params![today]).unwrap();
+        }
+        // 历史除权事件（去年分红 + 上周送股）
+        {
+            let m = market.lock().unwrap();
+            m.conn().execute("INSERT INTO adjustment_events VALUES ('600519.SH', ?, 25.0, 0.0, NULL, NULL)", duckdb::params![today - 300 * 86_400_000]).unwrap();
+            m.conn().execute("INSERT INTO adjustment_events VALUES ('600519.SH', ?, 0.0, 0.1, NULL, NULL)", duckdb::params![today - 7 * 86_400_000]).unwrap();
+        }
+        let n = {
+            let a = acct.lock().unwrap();
+            let m = market.lock().unwrap();
+            apply_pending_adjustments(&a, &m, today).unwrap()
+        };
+        assert_eq!(n, 0, "历史事件不应应用到今日新建持仓");
+        let p = acct.lock().unwrap().position("600519.SH").unwrap().unwrap();
+        assert_eq!(p.quantity, 100); // 数量不变
     }
 }
