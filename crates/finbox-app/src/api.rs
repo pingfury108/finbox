@@ -190,6 +190,9 @@ pub async fn accounts(State(st): State<WebState>) -> Json<Vec<AccountAsset>> {
             let total = cash + mv;
             let rp = if initial > 0.0 { (total / initial - 1.0) * 100.0 } else { 0.0 };
             let today_pnl = last_snap.map(|prev| total - prev).unwrap_or(0.0);
+            // sparkline：历史收盘快照 + 当前实时值（盘中能看到今日走势）
+            let mut spark: Vec<f64> = sparkline.iter().rev().take(19).rev().cloned().collect();
+            spark.push(total);
             out.push(AccountAsset {
                 name: a.name.clone(),
                 cash,
@@ -198,7 +201,7 @@ pub async fn accounts(State(st): State<WebState>) -> Json<Vec<AccountAsset>> {
                 return_pct: rp,
                 position_count: positions.len(),
                 today_pnl,
-                sparkline: sparkline.iter().rev().take(20).rev().cloned().collect(),
+                sparkline: spark,
             });
         }
     }

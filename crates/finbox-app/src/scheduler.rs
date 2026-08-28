@@ -348,8 +348,8 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
                         last_decision_min = min;
                     }
                 }
-                // 收盘后 15:05：复盘 + 账户快照（每天一次）
-                if minute >= 15 * 60 + 5 && !self.closed_today {
+                // 收盘后 15:05-15:15：复盘 + 账户快照（每天一次；窗口收窄防重启误写）
+                if minute >= 15 * 60 + 5 && minute < 15 * 60 + 15 && !self.closed_today {
                     self.review_old_decisions().await?;
                     self.snapshot_account().await?;
                     self.closed_today = true;
