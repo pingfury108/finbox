@@ -192,6 +192,18 @@ pub async fn accounts(State(st): State<WebState>) -> Json<Vec<AccountAsset>> {
             let today_pnl = last_snap.map(|prev| total - prev).unwrap_or(0.0);
             // sparkline：历史收盘快照 + 当前实时值（盘中能看到今日走势）
             let mut spark: Vec<f64> = sparkline.iter().rev().take(19).rev().cloned().collect();
+            // 最后快照是今天（已收盘）时替换为实时值，避免同日两点
+            if last_snap.is_some() {
+                let last_today = {
+                    let db2 = acct.lock().unwrap();
+                    db2.account_snapshots().ok().and_then(|sn| sn.last().map(|s| s.ts_ms)).map(|ts| {
+                        chrono::DateTime::from_timestamp_millis(ts + 8 * 3600 * 1000)
+                            .map(|t| t.format("%Y-%m-%d").to_string()).unwrap_or_default()
+                            == chrono::Local::now().format("%Y-%m-%d").to_string()
+                    }).unwrap_or(false)
+                };
+                if last_today { spark.pop(); }
+            }
             spark.push(total);
             out.push(AccountAsset {
                 name: a.name.clone(),
@@ -332,19 +344,40 @@ pub async fn equity(
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let acct = accounts::open_account(&st.cfg.data_dir, &name).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
-    let (snaps, initial) = {
+    let (snaps, initial, cash, positions) = {
         let db = acct.lock().unwrap();
-        let snaps = db.account_snapshots().map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
-        let initial = db.get_or_init_account(st.cfg.initial_capital).map(|a| a.initial_capital).unwrap_or(0.0);
-        (snaps, initial)
+        let ac = db.get_or_init_account(st.cfg.initial_capital).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+        (db.account_snapshots().map_err(|_| axum::http::StatusCode::NOT_FOUND)?, ac.initial_capital, ac.cash, db.positions().unwrap_or_default())
     };
-    let points: Vec<EquityPoint> = snaps.iter().map(|s| EquityPoint { ts: s.ts_ms, total: s.total_asset }).collect();
+    let mut points: Vec<EquityPoint> = snaps.iter().map(|s| EquityPoint { ts: s.ts_ms, total: s.total_asset }).collect();
+    // 末尾追加当前实时点（盘中含持仓浮动）
+    let now_total = {
+        let m = st.market.lock().unwrap();
+        let mv: f64 = positions.iter()
+            .map(|p| m.latest_snapshot_price(&p.thscode).ok().flatten().unwrap_or(p.avg_cost) * p.quantity as f64)
+            .sum();
+        cash + mv
+    };
+    // 实时点与最后快照同日（已收盘）时替换，避免同一类目两个点
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let same_day = points.last().map(|p| {
+        chrono::DateTime::from_timestamp_millis(p.ts + 8 * 3600 * 1000)
+            .map(|t| t.format("%Y-%m-%d").to_string()).unwrap_or_default() == today
+    }).unwrap_or(false);
+    if same_day {
+        if let Some(last) = points.last_mut() {
+            *last = EquityPoint { ts: chrono::Utc::now().timestamp_millis(), total: now_total };
+        }
+    } else {
+        points.push(EquityPoint { ts: chrono::Utc::now().timestamp_millis(), total: now_total });
+    }
     // 基准：沪深300 同区间净值化（首个快照日=初始资金）
     let mut benchmark: Vec<EquityPoint> = Vec::new();
     if let (Some(first), true) = (snaps.first(), initial > 0.0) {
         let m = st.market.lock().unwrap();
         if let Ok(bars) = m.recent_bars("000300.SH", 400) {
-            let base = bars.iter().find(|b| b.date_ms <= first.ts_ms).map(|b| b.close)
+            // bars 为正序；基准取首快照日或之前最近一个交易日的收盘（rev 找最后一个满足条件的）
+            let base = bars.iter().rev().find(|b| b.date_ms <= first.ts_ms).map(|b| b.close)
                 .or_else(|| bars.first().map(|b| b.close));
             if let Some(base) = base.filter(|b| *b > 0.0) {
                 for b in &bars {
@@ -573,7 +606,7 @@ pub async fn accounts_equity_all(State(st): State<WebState>) -> Json<Vec<serde_j
                     "ts": s.ts_ms,
                     "pct": (s.total_asset / initial - 1.0) * 100.0,
                 })).collect();
-                // 末尾追加当前实时点（含盘中浮动，与 sparkline 一致）
+                // 末尾追加当前实时点（含盘中浮动）；与最后快照同日（已收盘）时替换，避免同类目两点
                 let mv: f64 = {
                     let m = st.market.lock().unwrap();
                     positions.iter()
@@ -581,6 +614,12 @@ pub async fn accounts_equity_all(State(st): State<WebState>) -> Json<Vec<serde_j
                         .sum()
                 };
                 let now_total = cash + mv;
+                let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                let same_day = snaps.last().map(|s| {
+                    chrono::DateTime::from_timestamp_millis(s.ts_ms + 8 * 3600 * 1000)
+                        .map(|t| t.format("%Y-%m-%d").to_string()).unwrap_or_default() == today
+                }).unwrap_or(false);
+                if same_day { pts.pop(); }
                 pts.push(serde_json::json!({
                     "ts": chrono::Utc::now().timestamp_millis(),
                     "pct": (now_total / initial - 1.0) * 100.0,
