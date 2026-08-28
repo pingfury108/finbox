@@ -562,14 +562,29 @@ pub async fn accounts_equity_all(State(st): State<WebState>) -> Json<Vec<serde_j
     let mut out = Vec::new();
     for a in &list {
         if let Ok(acct) = accounts::open_account(&st.cfg.data_dir, &a.name) {
-            let db = acct.lock().unwrap();
-            let snaps = db.account_snapshots().unwrap_or_default();
-            let initial = db.get_or_init_account(st.cfg.initial_capital).map(|x| x.initial_capital).unwrap_or(0.0);
+            let (snaps, initial, cash, positions) = {
+                let db = acct.lock().unwrap();
+                let ac = db.get_or_init_account(st.cfg.initial_capital).map(|x| x.initial_capital).unwrap_or(0.0);
+                let cash = db.get_or_init_account(st.cfg.initial_capital).map(|x| x.cash).unwrap_or(0.0);
+                (db.account_snapshots().unwrap_or_default(), ac, cash, db.positions().unwrap_or_default())
+            };
             if initial > 0.0 && !snaps.is_empty() {
-                let pts: Vec<serde_json::Value> = snaps.iter().map(|s| serde_json::json!({
+                let mut pts: Vec<serde_json::Value> = snaps.iter().map(|s| serde_json::json!({
                     "ts": s.ts_ms,
                     "pct": (s.total_asset / initial - 1.0) * 100.0,
                 })).collect();
+                // 末尾追加当前实时点（含盘中浮动，与 sparkline 一致）
+                let mv: f64 = {
+                    let m = st.market.lock().unwrap();
+                    positions.iter()
+                        .map(|p| m.latest_snapshot_price(&p.thscode).ok().flatten().unwrap_or(p.avg_cost) * p.quantity as f64)
+                        .sum()
+                };
+                let now_total = cash + mv;
+                pts.push(serde_json::json!({
+                    "ts": chrono::Utc::now().timestamp_millis(),
+                    "pct": (now_total / initial - 1.0) * 100.0,
+                }));
                 out.push(serde_json::json!({ "name": a.name, "points": pts }));
             }
         }
