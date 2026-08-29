@@ -45,6 +45,45 @@ fn trend_summary(db: &Db, thscode: &str) -> String {
     )
 }
 
+/// 近 5 日价格序列（形态细节：连阴/放量滞涨等统计摘要看不出的走势）。
+fn recent_days_detail(db: &Db, thscode: &str) -> String {
+    let bars = match db.recent_bars(thscode, 5) {
+        Ok(b) if !b.is_empty() => b,
+        _ => return String::new(),
+    };
+    let parts: Vec<String> = bars
+        .iter()
+        .map(|b| {
+            let d = crate::context::fmt_bar_date(b.date_ms);
+            let chg = if b.open > 0.0 { (b.close / b.open - 1.0) * 100.0 } else { 0.0 };
+            format!("{}({:+.1}%)", d, chg)
+        })
+        .collect();
+    format!("近5日: {}", parts.join(" "))
+}
+
+fn fmt_bar_date(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms + 8 * 3600 * 1000)
+        .map(|t| t.format("%m-%d").to_string())
+        .unwrap_or_default()
+}
+
+/// 大盘环境：主要指数当日涨跌 + 涨跌家数。
+fn market_env_summary(market: &finbox_store::SharedDb) -> String {
+    let m = market.lock().unwrap();
+    let mut parts = Vec::new();
+    for (code, name) in [("000001.SH", "上证"), ("399001.SZ", "深成"), ("399006.SZ", "创业板")] {
+        if let Ok(Some((price, _chg, pct, _ts))) = m.latest_snapshot_full(code) {
+            parts.push(format!("{name} {price:.0}（{pct:+.2}%）"));
+        }
+    }
+    let (up, total) = m.market_breadth().unwrap_or((0, 0));
+    if total > 0 {
+        parts.push(format!("涨{}家/共{}家", up, total));
+    }
+    if parts.is_empty() { String::new() } else { parts.join("，") }
+}
+
 /// 构建用户上下文文本。
 pub fn build_context(
     market: &finbox_store::SharedDb,
@@ -57,6 +96,9 @@ pub fn build_context(
 
     let mut lines = vec![
         format!("可用现金: {:.2} 元", account.cash),
+        String::new(),
+        "== 大盘环境 ==".into(),
+        market_env_summary(market),
         String::new(),
         "== 当前持仓 ==".into(),
     ];
@@ -88,9 +130,11 @@ pub fn build_context(
         lines.push("== 今日全市场初筛候选 ==".into());
         for c in candidates {
             let vr = c.volume_ratio.map(|v| format!("{v:.2}")).unwrap_or_else(|| "-".into());
+            let trend = trend_summary(&market.lock().unwrap(), &c.thscode);
+            let detail = recent_days_detail(&market.lock().unwrap(), &c.thscode);
             lines.push(format!(
-                "{} {}: 现价 {:.2}, 涨幅 {:.2}%, 量比 {} | 入选: {} | {}",
-                c.thscode, c.name, c.price, c.pct, vr, c.reason, trend_summary(&market.lock().unwrap(), &c.thscode)
+                "{} {}: 现价 {:.2}, 涨幅 {:.2}%, 量比 {} | 入选: {} | {} | {}",
+                c.thscode, c.name, c.price, c.pct, vr, c.reason, trend, detail
             ));
         }
     }
