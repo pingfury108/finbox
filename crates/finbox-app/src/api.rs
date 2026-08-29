@@ -73,6 +73,8 @@ pub struct MarketOverview {
     pub regime: String,
     /// 最新快照时间戳（毫秒）
     pub ts_ms: i64,
+    /// 今天是否交易日（查交易日历）
+    pub trading_day: bool,
 }
 
 /// 全局决策时间线条目。
@@ -246,7 +248,9 @@ pub async fn market_overview(State(st): State<WebState>) -> Json<MarketOverview>
         let r = up as f64 / total as f64;
         if r >= 0.6 { "risk-on" } else if r >= 0.4 { "neutral" } else { "risk-off" }
     }.to_string();
-    Json(MarketOverview { indexes, up, total, regime, ts_ms: latest_ts })
+    let today = chrono::Local::now().format("%Y%m%d").to_string();
+    let trading_day = m.is_trading_day(&today).unwrap_or(false);
+    Json(MarketOverview { indexes, up, total, regime, ts_ms: latest_ts, trading_day })
 }
 
 /// 市场涨跌分布（分桶统计）。
