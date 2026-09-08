@@ -150,11 +150,13 @@
     if (ovCards) {
       const totalSum = accts.reduce((s, a) => s + a.total, 0);
       const todaySum = accts.reduce((s, a) => s + a.today_pnl, 0);
-      const retSum = accts.length ? accts.reduce((s, a) => s + a.return_pct, 0) / accts.length : 0;
+      const initSum = accts.reduce((s, a) => s + (a.initial_capital || 0), 0);
+      const pnlSum = totalSum - initSum;
+      const pnlPct = initSum > 0 ? (totalSum / initSum - 1) * 100 : 0;
       ovCards.innerHTML =
         ovCard('总资产', '¥' + money(totalSum), '') +
         ovCard('今日盈亏', sign(todaySum) + money(todaySum), cls(todaySum)) +
-        ovCard('平均收益率', pct(retSum), cls(retSum));
+        ovCard('累计盈亏', sign(pnlSum) + money(pnlSum) + '（' + pct(pnlPct) + '）', cls(pnlSum));
     }
 
     const empty = document.getElementById('acct-empty');

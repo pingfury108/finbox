@@ -157,7 +157,8 @@ impl Scheduler {
 
                 // 用最新日历判断今天是否交易日
                 let trading_day = self.market.lock().unwrap().is_trading_day(&today)?;
-                if trading_day && minute >= 9 * 60 + 30 && minute < 15 * 60 {
+                // 盘中采集延长到 15:03：15:00 收盘集合竞价产生收盘价，多采 3 分钟拿到真收盘价
+                if trading_day && minute >= 9 * 60 + 30 && minute < 15 * 60 + 3 {
                     // 盘中采集
                     let min = now.timestamp() / 60;
                     if min - self.last_collect >= self.cfg.collect_interval_seconds as i64 / 60 {

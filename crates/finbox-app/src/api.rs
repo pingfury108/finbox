@@ -51,6 +51,8 @@ pub struct AccountAsset {
     pub today_pnl: f64,
     /// 迷你曲线数据（最近资产快照序列）
     pub sparkline: Vec<f64>,
+    /// 初始资金（累计盈亏计算用）
+    pub initial_capital: f64,
 }
 
 /// 指数实时行情（状态条用）。
@@ -171,16 +173,21 @@ pub async fn accounts(State(st): State<WebState>) -> Json<Vec<AccountAsset>> {
     let mut out = Vec::new();
     for a in &list {
         if let Ok(acct) = accounts::open_account(&st.cfg.data_dir, &a.name) {
-            let (cash, positions, initial, sparkline, last_snap) = {
+            let (cash, positions, initial, sparkline, prev_close_snap) = {
                 let db = acct.lock().unwrap();
                 let ac = match db.get_or_init_account(st.cfg.initial_capital) {
                     Ok(x) => x,
                     Err(_) => continue,
                 };
-                let sp: Vec<f64> = db.account_snapshots().unwrap_or_default()
-                    .iter().map(|s| s.total_asset).collect();
-                let last = sp.last().copied();
-                (ac.cash, db.positions().unwrap_or_default(), ac.initial_capital, sp, last)
+                let snaps = db.account_snapshots().unwrap_or_default();
+                let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                // 今日盈亏基准：最近一条"非今日"快照（昨收）；今日快照是 15:05 收盘后写的，不能当基准
+                let prev = snaps.iter().rev().find(|s| {
+                    chrono::DateTime::from_timestamp_millis(s.ts_ms + 8 * 3600 * 1000)
+                        .map(|t| t.format("%Y-%m-%d").to_string()).unwrap_or_default() != today
+                }).map(|s| s.total_asset);
+                let sp: Vec<f64> = snaps.iter().map(|s| s.total_asset).collect();
+                (ac.cash, db.positions().unwrap_or_default(), ac.initial_capital, sp, prev)
             };
             // 真实市值：持仓按行情库最新价
             let mv: f64 = {
@@ -191,7 +198,7 @@ pub async fn accounts(State(st): State<WebState>) -> Json<Vec<AccountAsset>> {
             };
             let total = cash + mv;
             let rp = if initial > 0.0 { (total / initial - 1.0) * 100.0 } else { 0.0 };
-            let today_pnl = last_snap.map(|prev| total - prev).unwrap_or(0.0);
+            let today_pnl = prev_close_snap.map(|prev| total - prev).unwrap_or(0.0);
             // sparkline：历史收盘快照 + 当前实时值（盘中能看到今日走势）
             let mut spark: Vec<f64> = sparkline.iter().rev().take(19).rev().cloned().collect();
             // 最后快照是今天（已收盘）时替换为实时值，避免同日两点
@@ -216,6 +223,7 @@ pub async fn accounts(State(st): State<WebState>) -> Json<Vec<AccountAsset>> {
                 position_count: positions.len(),
                 today_pnl,
                 sparkline: spark,
+                initial_capital: initial,
             });
         }
     }
