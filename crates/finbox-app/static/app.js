@@ -156,7 +156,7 @@
       ovCards.innerHTML =
         ovCard('总资产', '¥' + money(totalSum), '') +
         ovCard('今日盈亏', sign(todaySum) + money(todaySum), cls(todaySum)) +
-        ovCard('累计盈亏', sign(pnlSum) + money(pnlSum) + '（' + pct(pnlPct) + '）', cls(pnlSum));
+        ovCard('累计盈亏 <span class="label-pct">' + pct(pnlPct) + '</span>', sign(pnlSum) + money(pnlSum), cls(pnlSum));
     }
 
     const empty = document.getElementById('acct-empty');
