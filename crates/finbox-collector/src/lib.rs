@@ -117,37 +117,33 @@ impl Collector {
         }
     }
 
-    /// 前复权表全量重建（首次/修复用）。逐票计算，带进度日志。
+    /// 前复权缺失补齐（新股/中断续跑）：只重建缺失标的，不全量重跑。
     pub async fn rebuild_adj_all(&self) -> Result<u64> {
         let codes: Vec<String> = {
             let db = self.db.lock().unwrap();
-            let mut stmt = db.conn().prepare("SELECT DISTINCT thscode FROM daily_bars")?;
-            let mut rows = stmt.query([])?;
-            let mut v = Vec::new();
-            while let Some(r) = rows.next()? {
-                v.push(r.get(0)?);
-            }
-            v
+            db.adj_missing_codes()?
         };
         let total_codes = codes.len();
-        info!("[数据] 前复权全量重建开始: {total_codes} 只标的");
+        if total_codes == 0 {
+            return Ok(0);
+        }
+        info!("[数据] 前复权缺失补齐: {total_codes} 只标的");
         let mut total = 0u64;
         for (i, code) in codes.iter().enumerate() {
-            // 每 200 只打印进度；锁粒度放小避免长时间阻塞
             let n = {
                 let db = self.db.lock().unwrap();
                 db.rebuild_adj_bars_for(code)?
             };
             total += n;
             if (i + 1) % 200 == 0 {
-                info!("[数据] 前复权重建进度: {}/{}", i + 1, total_codes);
+                info!("[数据] 前复权补齐进度: {}/{}", i + 1, total_codes);
             }
             // 每批让出时间片：防锁轰炸导致 Web 饿死（上轮事故）
             if (i + 1) % 50 == 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
-        info!("[数据] 前复权全量重建完成: {total} 行");
+        info!("[数据] 前复权补齐完成: {total} 行");
         Ok(total)
     }
 

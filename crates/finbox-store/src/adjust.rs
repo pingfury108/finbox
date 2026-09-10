@@ -137,6 +137,20 @@ impl Db {
         )?;
         Ok(adj < raw)
     }
+
+    /// 缺失前复权的标的列表（daily_bars 有但 adj_daily_bars 没有，如新股）。
+    pub fn adj_missing_codes(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT thscode FROM daily_bars
+             WHERE thscode NOT IN (SELECT DISTINCT thscode FROM adj_daily_bars)",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push(r.get(0)?);
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
