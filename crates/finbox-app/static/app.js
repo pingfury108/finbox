@@ -282,7 +282,7 @@
       cards.innerHTML = [
         card('总资产', '¥' + money(acct.total)),
         card('今日盈亏', sign(acct.today_pnl) + money(acct.today_pnl), cls(acct.today_pnl)),
-        card('累计盈亏', sign(pnl) + money(pnl) + '<span class="pct-sub">（' + pct(acct.return_pct) + '）</span>', cls(pnl)),
+        card('累计盈亏 <span class="label-pct">' + pct(acct.return_pct) + '</span>', sign(pnl) + money(pnl), cls(pnl)),
         card('可用现金', '¥' + money(acct.cash)),
         card('持仓市值', '¥' + money(acct.market_value)),
         card('仓位', fmt(posPct, 1) + '%', posPct > 60 ? 'up' : ''),
