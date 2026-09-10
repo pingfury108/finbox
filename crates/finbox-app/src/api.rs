@@ -202,7 +202,7 @@ pub async fn accounts(State(st): State<WebState>) -> Json<Vec<AccountAsset>> {
             // sparkline：历史收盘快照 + 当前实时值（盘中能看到今日走势）
             let mut spark: Vec<f64> = sparkline.iter().rev().take(19).rev().cloned().collect();
             // 最后快照是今天（已收盘）时替换为实时值，避免同日两点
-            if last_snap.is_some() {
+            if !sparkline.is_empty() {
                 let last_today = {
                     let db2 = acct.lock().unwrap();
                     db2.account_snapshots().ok().and_then(|sn| sn.last().map(|s| s.ts_ms)).map(|ts| {

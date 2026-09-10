@@ -278,10 +278,11 @@
     const acct = accts.find(a => a.name === name);
     if (acct) {
       const posPct = acct.total > 0 ? (acct.market_value / acct.total * 100) : 0;
+      const pnl = acct.total - (acct.initial_capital || acct.total);
       cards.innerHTML = [
         card('总资产', '¥' + money(acct.total)),
         card('今日盈亏', sign(acct.today_pnl) + money(acct.today_pnl), cls(acct.today_pnl)),
-        card('累计收益', pct(acct.return_pct), cls(acct.return_pct)),
+        card('累计盈亏', sign(pnl) + money(pnl) + '（' + pct(acct.return_pct) + '）', cls(pnl)),
         card('可用现金', '¥' + money(acct.cash)),
         card('持仓市值', '¥' + money(acct.market_value)),
         card('仓位', fmt(posPct, 1) + '%', posPct > 60 ? 'up' : ''),
