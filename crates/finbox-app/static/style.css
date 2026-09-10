@@ -243,6 +243,7 @@ a:hover { text-decoration: underline; }
 .regime.neutral { background: #f0883e26; color: var(--accent2); }
 .regime.risk-off { background: #f6465d26; color: var(--up); }
 .sys-status { margin-left: auto; font-size: 12px; color: var(--muted); }
+.sys-status .sys-short { display: none; }
 .sys-status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--down); margin-right: 5px; }
 .sys-status.stale .dot { background: var(--up); }
 
@@ -362,6 +363,9 @@ a:hover { text-decoration: underline; }
   .brand { font-size: 16px; }
   .mainnav a { padding: 8px 12px; }
   .sys-status { font-size: 11px; }
+  .sys-status .sys-long { display: none; }
+  .sys-short { display: none; }
+  @media (max-width: 768px) { .sys-status .sys-short { display: inline; } }
 
   /* 状态条：横向滑动，不换行 */
   .statusbar {

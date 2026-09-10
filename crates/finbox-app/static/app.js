@@ -110,14 +110,14 @@
       const inSession = ov.trading_day && mins >= 9 * 60 + 30 && mins < 15 * 60;
       const lag = Date.now() - ov.ts_ms;
       const stale = inSession && ov.ts_ms > 0 && lag > 10 * 60 * 1000;
-      let label;
-      if (!ov.trading_day) label = '休市 · 最近数据 ' + fmtTime(ov.ts_ms);
-      else if (ov.ts_ms <= 0) label = '待采集';
-      else if (inSession) label = '数据 ' + fmtTime(ov.ts_ms);
-      else if (mins >= 15 * 60) label = '已收盘 ' + fmtTime(ov.ts_ms);
-      else label = '待开盘 ' + fmtTime(ov.ts_ms);
+      let label, short;
+      if (!ov.trading_day) { label = '休市 · 最近数据 ' + fmtTime(ov.ts_ms); short = '休市'; }
+      else if (ov.ts_ms <= 0) { label = '待采集'; short = '待采'; }
+      else if (inSession) { label = '数据 ' + fmtTime(ov.ts_ms); short = '盘中'; }
+      else if (mins >= 15 * 60) { label = '已收盘 ' + fmtTime(ov.ts_ms); short = '收盘'; }
+      else { label = '待开盘 ' + fmtTime(ov.ts_ms); short = '待开'; }
       sys.className = 'sys-status' + (stale ? ' stale' : '');
-      sys.innerHTML = '<span class="dot"></span>' + label;
+      sys.innerHTML = '<span class="dot"></span><span class="sys-long">' + label + '</span><span class="sys-short">' + short + '</span>';
     }
   }
   function startStatusBar() {
