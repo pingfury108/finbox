@@ -282,7 +282,7 @@
       cards.innerHTML = [
         card('总资产', '¥' + money(acct.total)),
         card('今日盈亏', sign(acct.today_pnl) + money(acct.today_pnl), cls(acct.today_pnl)),
-        card('累计盈亏', sign(pnl) + money(pnl) + '（' + pct(acct.return_pct) + '）', cls(pnl)),
+        card('累计盈亏', sign(pnl) + money(pnl) + '<span class="pct-sub">（' + pct(acct.return_pct) + '）</span>', cls(pnl)),
         card('可用现金', '¥' + money(acct.cash)),
         card('持仓市值', '¥' + money(acct.market_value)),
         card('仓位', fmt(posPct, 1) + '%', posPct > 60 ? 'up' : ''),
@@ -388,9 +388,11 @@
       html += '<table class="tbl" style="margin-top:10px"><thead><tr><th>标的</th><th>现价</th><th>成本</th><th>距止损线(-5%)</th><th>距止盈线(+15%)</th></tr></thead><tbody>';
       html += r.positions.map(p => {
         const stopCls = p.to_stop_pct < 2 ? 'up' : '';
+        // 距止盈线统一为正值距离（还差多少到止盈），与止损线同口径
+        const toProfit = -p.to_profit_pct;
         return '<tr><td data-label="标的">' + esc(p.name) + '</td><td data-label="现价">' + fmt(p.price) + '</td><td data-label="成本">' + fmt(p.avg_cost) + '</td>' +
           '<td data-label="距止损线" class="' + stopCls + '">' + fmt(p.to_stop_pct, 1) + '%</td>' +
-          '<td data-label="距止盈线">' + fmt(p.to_profit_pct, 1) + '%</td></tr>';
+          '<td data-label="距止盈线">' + fmt(toProfit, 1) + '%</td></tr>';
       }).join('');
       html += '</tbody></table>';
     } else {
