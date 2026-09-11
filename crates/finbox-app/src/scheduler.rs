@@ -146,45 +146,71 @@ impl Scheduler {
                 // 盘前同步：工作日 9:00-9:15 先刷新交易日历（即使旧日历不含今天，
                 // 也先拉新日历，避免“日历旧→判定非交易日→不刷新”的死循环）
                 if minute >= 9 * 60 && minute < 9 * 60 + 15 && !self.pre_open_done {
-                    self.refresh_collector_key()?;
-                    let days = self.collector.client.trading_days().await?;
-                    self.collector.upsert_trading_days(&days).await?;
-                    self.collector.sync_daily_bars(std::path::Path::new("data/dumps"), &days).await?;
-                    self.collector.import_adjustment_factors(std::path::Path::new("data/dumps")).await?;
-                    log::info!("[采集][盘前] 同步完成（{} 个交易日）", days.item.len());
-                    self.pre_open_done = true;
+                    let sync_result = async {
+                        self.refresh_collector_key()?;
+                        let days = self.collector.client.trading_days().await?;
+                        self.collector.upsert_trading_days(&days).await?;
+                        self.collector.sync_daily_bars(std::path::Path::new("data/dumps"), &days).await?;
+                        self.collector.import_adjustment_factors(std::path::Path::new("data/dumps")).await?;
+                        anyhow::Ok(days.item.len())
+                    }.await;
+                    match sync_result {
+                        Ok(n) => {
+                            log::info!("[采集][盘前] 同步完成（{} 个交易日）", n);
+                            self.pre_open_done = true;
+                        }
+                        Err(e) => log::warn!("[采集][盘前] 同步失败（下分钟重试）: {e}"),
+                    }
                 }
 
-                // 用最新日历判断今天是否交易日
-                let trading_day = self.market.lock().unwrap().is_trading_day(&today)?;
+                // 用最新日历判断今天是否交易日（读失败时按交易日处理，保守继续采集）
+                let trading_day = self.market.lock().unwrap().is_trading_day(&today).unwrap_or(true);
                 // 盘中采集延长到 15:03：15:00 收盘集合竞价产生收盘价，多采 3 分钟拿到真收盘价
                 if trading_day && minute >= 9 * 60 + 30 && minute < 15 * 60 + 3 {
                     // 盘中采集
                     let min = now.timestamp() / 60;
                     if min - self.last_collect >= self.cfg.collect_interval_seconds as i64 / 60 {
-                        self.refresh_collector_key()?;
-                        let n = self.collector.collect_market_snapshot().await?;
-                        // 指数快照一并采集（盘中实时）
-                        if let Err(e) = self.collector.collect_index_snapshot().await {
-                            log::warn!("[采集][盘中] 指数快照失败: {e}");
+                        if let Err(e) = self.refresh_collector_key() {
+                            log::warn!("[采集][盘中] key 刷新失败: {e}");
                         }
-                        log::info!("[采集][盘中] 快照 {n} 只");
-                        self.last_collect = min;
+                        match self.collector.collect_market_snapshot().await {
+                            Ok(n) => {
+                                // 指数快照一并采集（盘中实时）
+                                if let Err(e) = self.collector.collect_index_snapshot().await {
+                                    log::warn!("[采集][盘中] 指数快照失败: {e}");
+                                }
+                                log::info!("[采集][盘中] 快照 {n} 只");
+                                self.last_collect = min;
+                            }
+                            Err(e) => {
+                                // 失败不更新 last_collect，每分钟重试（DNS/网络恢复后自动跟上）
+                                log::warn!("[采集][盘中] 快照采集失败（每分钟重试）: {e}");
+                                self.last_collect = min;
+                            }
+                        }
                     }
                 }
                 // 收盘后 15:30：同步当天日K（盘前只到昨日，当天日K收盘后才产生）
                 if trading_day && minute >= 15 * 60 + 30 && !self.after_close_synced {
-                    self.refresh_collector_key()?;
-                    let days = self.collector.client.trading_days().await?;
-                    self.collector.sync_daily_bars(std::path::Path::new("data/dumps"), &days).await?;
-                    // 指数日K也补当天
-                    let _ = self.collector.sync_index_bars(1200).await;
-                    // 前复权日K增量（AI 分析用复权价）
-                    let today_ms = chrono::Local::now().date_naive().and_hms_opt(0,0,0).unwrap()
-                        .and_local_timezone(chrono::Local).unwrap().timestamp_millis();
-                    let _ = self.collector.adj_daily_update(today_ms).await;
-                    log::info!("[采集][收盘后] 当日日K+指数+前复权同步完成");
-                    self.after_close_synced = true;
+                    let sync_result = async {
+                        self.refresh_collector_key()?;
+                        let days = self.collector.client.trading_days().await?;
+                        self.collector.sync_daily_bars(std::path::Path::new("data/dumps"), &days).await?;
+                        anyhow::Ok(())
+                    }.await;
+                    match sync_result {
+                        Ok(()) => {
+                            // 指数日K也补当天
+                            let _ = self.collector.sync_index_bars(1200).await;
+                            // 前复权日K增量（AI 分析用复权价）
+                            let today_ms = chrono::Local::now().date_naive().and_hms_opt(0,0,0).unwrap()
+                                .and_local_timezone(chrono::Local).unwrap().timestamp_millis();
+                            let _ = self.collector.adj_daily_update(today_ms).await;
+                            log::info!("[采集][收盘后] 当日日K+指数+前复权同步完成");
+                            self.after_close_synced = true;
+                        }
+                        Err(e) => log::warn!("[采集][收盘后] 同步失败（每分钟重试）: {e}"),
+                    }
                 }
 
                 if minute < 9 * 60 {
