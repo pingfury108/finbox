@@ -222,20 +222,33 @@ impl Db {
     // ---------- 行业归属 ----------
 
     /// 写入某行业的成分股（同花顺行业指数变动极低，按行业覆盖重写）。
+    ///
+    /// 批量单语句写入：逐行 INSERT 在 DuckDB 下开销极大（5565 行需数分钟）。
     pub fn replace_industry(&self, industry_code: &str, industry_name: &str, codes: &[String]) -> Result<u64> {
         self.conn.execute(
             "DELETE FROM industry_members WHERE industry_code = ?",
             duckdb::params![industry_code],
         )?;
-        let mut n = 0u64;
-        for code in codes {
-            self.conn.execute(
-                "INSERT OR REPLACE INTO industry_members (thscode, industry_code, industry_name) VALUES (?, ?, ?)",
-                duckdb::params![code, industry_code, industry_name],
-            )?;
-            n += 1;
+        if codes.is_empty() {
+            return Ok(0);
         }
-        Ok(n)
+        let mut params: Vec<Box<dyn duckdb::ToSql>> = Vec::with_capacity(codes.len() * 3);
+        let mut values = String::new();
+        for (i, code) in codes.iter().enumerate() {
+            if i > 0 {
+                values.push(',');
+            }
+            values.push_str("(?,?,?)");
+            params.push(Box::new(code.clone()));
+            params.push(Box::new(industry_code.to_string()));
+            params.push(Box::new(industry_name.to_string()));
+        }
+        let sql = format!(
+            "INSERT OR REPLACE INTO industry_members (thscode, industry_code, industry_name) VALUES {values}"
+        );
+        let refs: Vec<&dyn duckdb::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        self.conn.execute(&sql, duckdb::params_from_iter(refs))?;
+        Ok(codes.len() as u64)
     }
 
     /// 某标的的行业名（无记录返回 None）。

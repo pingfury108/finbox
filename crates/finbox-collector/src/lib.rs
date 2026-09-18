@@ -156,9 +156,10 @@ impl Collector {
 
     /// 采集几大 A 股指数日 K（复用 daily_bars 表，thscode 天然区分个股/指数）。
     /// 返回写入行数。
-    /// 同步行业归属（同花顺一级行业指数成分股）。行业结构变化极低，每日盘前一次。
+    /// 同步行业归属（同花顺一级行业指数成分股）。
     ///
     /// 用于“伪分散”修正：同行业持仓/候选过多 = 实际是一只股票的风险。
+    /// 90 个行业**并发**拉取（顺序拉需约 9 分钟，并发后约 1 分钟）。
     pub async fn sync_industries(&self) -> Result<u64> {
         let list = self.client.ths_index_list(Some("industry")).await?;
         let items = list
@@ -175,27 +176,51 @@ impl Collector {
                 code.starts_with("881").then_some((code, name))
             })
             .collect();
-        let mut total = 0u64;
-        for (code, name) in &l1 {
-            match self.client.ths_index_constituents(code).await {
-                Ok(v) => {
-                    let codes: Vec<String> = v
-                        .get("item")
-                        .and_then(|x| x.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|c| c.get("thscode").and_then(|t| t.as_str()).map(|s| s.to_string()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let n = self.db.lock().unwrap().replace_industry(code, name, &codes)?;
-                    total += n;
+
+        // 并发拉取（限并 8：不把上游打限流，也不要串行 9 分钟）
+        let mut join = tokio::task::JoinSet::new();
+        for (code, name) in l1.iter().cloned() {
+            let client = self.client.clone();
+            join.spawn(async move {
+                let r = client.ths_index_constituents(&code).await;
+                (code, name, r)
+            });
+            if join.len() >= 8 {
+                if let Some(res) = join.join_next().await {
+                    Self::apply_industry(&self.db, res)?;
                 }
-                Err(e) => log::warn!("[数据] 行业 {name}({code}) 成分股获取失败: {e}"),
             }
         }
-        info!("[数据] 行业归属同步完成: {} 个行业 / {total} 条成分", l1.len());
-        Ok(total)
+        while let Some(res) = join.join_next().await {
+            Self::apply_industry(&self.db, res)?;
+        }
+        let (ind, stocks) = self.db.lock().unwrap().industry_coverage().unwrap_or((0, 0));
+        info!("[数据] 行业归属同步完成: {ind} 个行业 / {stocks} 只股票");
+        Ok(stocks as u64)
+    }
+
+    /// 写入单个行业的拉取结果。
+    fn apply_industry(
+        db: &SharedDb,
+        res: std::result::Result<(String, String, std::result::Result<serde_json::Value, hithink_sdk::Error>), tokio::task::JoinError>,
+    ) -> Result<()> {
+        let (code, name, r) = res.map_err(|e| anyhow::anyhow!("行业任务失败: {e}"))?;
+        match r {
+            Ok(v) => {
+                let codes: Vec<String> = v
+                    .get("item")
+                    .and_then(|x| x.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|c| c.get("thscode").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                db.lock().unwrap().replace_industry(&code, &name, &codes)?;
+            }
+            Err(e) => log::warn!("[数据] 行业 {name}({code}) 成分股获取失败: {e}"),
+        }
+        Ok(())
     }
 
     pub async fn sync_index_bars(&self, days: u32) -> Result<u64> {

@@ -92,19 +92,17 @@ impl Scheduler {
 
         // 行业归属自检：无数据（新库/首次）则后台同步（供候选/持仓行业去重）
         if self.market.lock().unwrap().industry_coverage().map(|(i, _)| i == 0).unwrap_or(false) {
-            let collector = finbox_collector::Collector::new(
-                hithink_sdk::Client::new(self.cfg.hithink_api_key.clone())?,
-                self.market.clone(),
-            );
-            tokio::spawn(async move {
-                if let Err(e) = collector.sync_industries().await {
-                    log::error!("[数据] 行业归属同步失败: {e}");
-                }
-            });
-            log::info!("[数据] 行业归属为空，后台同步中（约 90 个一级行业）");
+            log::info!("[数据] 行业归属为空，后台同步中（90 个一级行业，并发约 1 分钟）");
         }
 
         let mut handles = Vec::new();
+
+        // 行业归属定时同步（每日一次，跨重启生效；失败 60s 重试）
+        {
+            let client = hithink_sdk::Client::new(self.cfg.hithink_api_key.clone())?;
+            let market = self.market.clone();
+            handles.push(tokio::spawn(async move { industry_sync_loop(client, market).await }));
+        }
 
         // Web 界面（同进程，端口用环境变量 FINBOX_BIND，默认 0.0.0.0:8000）
         // market 传共享连接：同进程另开 DuckDB 实例与采集端互不可见
@@ -172,8 +170,6 @@ impl Scheduler {
                         self.collector.upsert_trading_days(&days).await?;
                         self.collector.sync_daily_bars(std::path::Path::new("data/dumps"), &days).await?;
                         self.collector.import_adjustment_factors(std::path::Path::new("data/dumps")).await?;
-                        // 行业归属（供候选/持仓行业去重）：每日盘前刷新一次
-                        let _ = self.collector.sync_industries().await;
                         anyhow::Ok(days.item.len())
                     }.await;
                     match sync_result {
@@ -245,7 +241,7 @@ impl Scheduler {
         }
     }
 
-    /// 从 market 库 meta 刷新同花顺 key（页面配置即时生效）。
+    /// 从市场库 meta 刷新同花顺 key（页面配置即时生效）。
     fn refresh_collector_key(&mut self) -> anyhow::Result<()> {
         let key = self
             .market
@@ -257,6 +253,48 @@ impl Scheduler {
             self.collector.client = Client::new(key)?;
         }
         Ok(())
+    }
+}
+
+/// 行业归属同步任务：独立循环，每日一次（存市场库 meta 的日期标记，**跨重启生效**）。
+///
+/// - 空库/首次：立即同步
+/// - 当日未同步（含重启/昨日失败）：立即重试（60s 后）
+/// - 已同步：每日凌晨 8:00 后检查一次
+/// 行业结构变化极慢，不需要更高的频率。
+async fn industry_sync_loop(client: hithink_sdk::Client, market: SharedDb) -> anyhow::Result<()> {
+    let mut first = true;
+    loop {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let hour = chrono::Timelike::hour(&chrono::Local::now());
+        // 读状态：出错不退出循环（否则任务静默死亡且无日志）
+        let (covered, last) = {
+            let m = market.lock().unwrap();
+            let covered = m.industry_coverage().map(|(i, _)| i).unwrap_or(-1);
+            let last = m.meta_get("industry_synced_date").ok().flatten().unwrap_or_default();
+            (covered, last)
+        };
+        let need = covered == 0 || (last != today && hour >= 8);
+        if need {
+            log::info!("[数据] 行业归属同步开始（已有 {covered} 个行业，上次同步 {last}）");
+            let collector = finbox_collector::Collector::new(client.clone(), market.clone());
+            match collector.sync_industries().await {
+                Ok(n) => {
+                    if let Err(e) = market.lock().unwrap().meta_set("industry_synced_date", &today) {
+                        log::warn!("[数据] 行业同步日期写入失败: {e}");
+                    }
+                    log::info!("[数据] 行业归属同步完成（{n} 只股票）");
+                }
+                Err(e) => log::warn!("[数据] 行业归属同步失败（5 分钟后重试）: {e}"),
+            }
+            tokio::time::sleep(Duration::from_secs(300)).await;
+        } else {
+            if first {
+                log::info!("[数据] 行业归属已是最新（{covered} 个行业，{today} 已同步）");
+            }
+            tokio::time::sleep(Duration::from_secs(1800)).await;
+        }
+        first = false;
     }
 }
 
