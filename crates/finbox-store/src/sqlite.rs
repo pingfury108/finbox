@@ -10,6 +10,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use finbox_core::{Account, OrderSide, Position, Trade};
+use rusqlite::OptionalExtension;
 use crate::decision::DecisionLog;
 use crate::review::{AccountSnapshot, ReviewRow};
 use crate::trading::RecentTrade;
@@ -259,6 +260,17 @@ impl AccountDb {
         Ok(qty as u32)
     }
 
+    /// 当日是否有卖出成交（换股冷却：卖出当日不再买入）。
+    pub fn sold_since(&self, day_start_ms: i64) -> Result<Option<String>> {
+        let v: Option<String> = self.conn.query_row(
+            "SELECT thscode FROM trades WHERE side = 'SELL' AND ts_ms >= ?
+             ORDER BY ts_ms DESC LIMIT 1",
+            rusqlite::params![day_start_ms],
+            |r| r.get(0),
+        ).optional().map_err(se)?;
+        Ok(v)
+    }
+
     /// 某标的最近一次买入时间（超期持仓判断用）。
     pub fn position_bought_at(&self, thscode: &str) -> Result<Option<i64>> {
         let v: Option<i64> = self.conn.query_row(
@@ -303,6 +315,12 @@ impl AccountDb {
             "INSERT INTO meta VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             rusqlite::params![key, value],
         ).map_err(se)?;
+        Ok(())
+    }
+
+    /// 删除 meta（新股建仓时清理止盈标记，重置本持仓周期的止盈档位）。
+    pub fn meta_del(&self, key: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM meta WHERE key = ?", rusqlite::params![key]).map_err(se)?;
         Ok(())
     }
 

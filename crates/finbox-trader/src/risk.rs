@@ -1,13 +1,15 @@
 //! 硬性风控层：独立于 LLM，不可绕过。
 //!
-//! - 单票止损：亏损 ≥ 5% 强制清仓
-//! - 分批止盈：盈利 ≥ 15% 减半仓
+//! - 单票止损：**收盘价**亏损 ≥ 5% 强制清仓（盘中插针仅预警，不卖）
+//! - 分批止盈：盈利 ≥ 6% 减 1/3，≥ 10% 再减 1/3（落袋为安）
 //! - 持仓超期：超过 N 天且无起色（现价 < 成本）强制清仓
 //! - 账户熔断：总资产回撤 ≥ 5% 时停止买入（熔断期）
+//! - 市场门控：风险偏好决定目标仓位上限，risk-off 时**真减仓**到目标（不是只冻结买入）
 //!
 //! 双库架构：行情（价格/涨跌家数）读 market 库，账户（持仓/熔断状态）读写 account 库。
 //! 铁律：**不同时持有两把锁** —— 先读持仓（acct）解锁，再读价格（market）解锁，最后写状态（acct）。
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use chrono::Utc;
@@ -17,10 +19,14 @@ use finbox_store::SharedDb;
 /// 风控参数。
 #[derive(Debug, Clone)]
 pub struct RiskConfig {
-    /// 单票止损阈值（亏损比例）
+    /// 单票止损阈值（亏损比例，**收盘价**判定）
     pub stop_loss_pct: f64,
-    /// 止盈阈值（盈利比例，达到则减半）
+    /// 止盈第一档（减 1/3）
     pub take_profit_pct: f64,
+    /// 止盈第二档（再减 1/3）
+    pub take_profit_pct2: f64,
+    /// 每次止盈减仓比例
+    pub trim_ratio: f64,
     /// 持仓超期天数（超过且无起色则清仓）
     pub max_holding_days: u32,
     /// 账户熔断回撤阈值
@@ -33,7 +39,9 @@ impl Default for RiskConfig {
     fn default() -> Self {
         Self {
             stop_loss_pct: 0.05,
-            take_profit_pct: 0.15,
+            take_profit_pct: 0.06,
+            take_profit_pct2: 0.10,
+            trim_ratio: 1.0 / 3.0,
             max_holding_days: 20,
             fuse_drawdown_pct: 0.05,
             fuse_days: 5,
@@ -57,13 +65,16 @@ pub struct RiskReport {
 }
 
 /// 市场状态 → 目标总仓位上限。
+///
+/// 调优：risk-on 60%→75%（40% 制度性闲置太重，目标 +5% 需组合涨 8.3%）；
+/// neutral 40%→55%；risk-off 0%→30%（降仓而非清仓，避免与 re-buy 反复摩擦）。
 fn regime_max_total(breadth_ratio: f64) -> (&'static str, f64) {
     if breadth_ratio >= 0.6 {
-        ("risk-on", 0.60)
+        ("risk-on", 0.75)
     } else if breadth_ratio >= 0.4 {
-        ("neutral", 0.40)
+        ("neutral", 0.55)
     } else {
-        ("risk-off", 0.0)
+        ("risk-off", 0.30)
     }
 }
 
@@ -127,7 +138,84 @@ impl RiskManager {
                 report.forced_sells.push(sell);
             }
         }
+
+        // 4. 市场门控：risk-off 时**真减仓**到目标仓位（不是只冻结买入）
+        //    旧逻辑只拦买入，导致跌的时候满仓挨跌、涨的时候叉 6 成，两头不占优。
+        if report.max_total_pct > 0.0 {
+            let trims = self.trim_to_target(&positions, &report.forced_sells, total_asset, report.max_total_pct)?;
+            if !trims.is_empty() {
+                report.note = format!("{}{}超额仓位减仓 {} 笔", report.note, if report.note.is_empty() { "" } else { "；" }, trims.len());
+                report.forced_sells.extend(trims);
+            }
+        }
         Ok(report)
+    }
+
+    /// 总仓位超过目标上限时，按**浮亏最大优先**减仓（先砍风险敎口）。
+    /// 返回需要卖出的委托（不含已在 `existing` 里的标的）。
+    fn trim_to_target(
+        &self,
+        positions: &[Position],
+        existing: &[OrderIntent],
+        total_asset: f64,
+        target_pct: f64,
+    ) -> finbox_store::Result<Vec<OrderIntent>> {
+        if total_asset <= 0.0 {
+            return Ok(vec![]);
+        }
+        let done: HashSet<&str> = existing.iter().map(|i| i.thscode.as_str()).collect();
+        // (代码, 名称, 数量, 市值, 盈亏比例)
+        let mut rows: Vec<(String, String, u32, f64, f64)> = Vec::new();
+        let mut mv_total = 0.0;
+        for p in positions {
+            if done.contains(p.thscode.as_str()) {
+                continue;
+            }
+            let price = self
+                .market
+                .lock()
+                .unwrap()
+                .latest_snapshot_price(&p.thscode)?
+                .unwrap_or(p.avg_cost);
+            let mv = price * p.quantity as f64;
+            mv_total += mv;
+            let pnl = if p.avg_cost > 0.0 { price / p.avg_cost - 1.0 } else { 0.0 };
+            rows.push((p.thscode.clone(), p.name.clone(), p.quantity, mv, pnl));
+        }
+        let cur_pct = mv_total / total_asset;
+        if cur_pct <= target_pct {
+            return Ok(vec![]);
+        }
+        let need = (cur_pct - target_pct) * total_asset;
+        rows.sort_by(|a, b| a.4.partial_cmp(&b.4).unwrap_or(std::cmp::Ordering::Equal));
+        let mut out = Vec::new();
+        let mut sold = 0.0;
+        for (code, name, qty, mv, _) in rows {
+            if sold >= need {
+                break;
+            }
+            let unit = if qty > 0 { mv / qty as f64 } else { 0.0 };
+            if unit <= 0.0 {
+                continue;
+            }
+            let want = (need - sold).min(mv);
+            let mut q = ((want / unit) / 100.0).floor() as u32 * 100;
+            if q >= qty {
+                q = qty; // 整只清掉
+            }
+            if q == 0 {
+                continue;
+            }
+            out.push(OrderIntent {
+                thscode: code,
+                name,
+                side: OrderSide::Sell,
+                quantity: q,
+                decision_id: None,
+            });
+            sold += unit * q as f64;
+        }
+        Ok(out)
     }
 
     /// 总资产 = 现金 + 持仓市值（按最新行情价，读 market）。
@@ -148,38 +236,93 @@ impl RiskManager {
     }
 
     /// 对单只持仓判断是否需要卖出。
+    ///
+    /// 止损/超期用**收盘价**（避开日内插针洗盘），止盈用实时价（落袋为安）。
     fn check_position(&self, p: &Position) -> finbox_store::Result<Option<OrderIntent>> {
-        let cur = self
-            .market
-            .lock()
-            .unwrap()
-            .latest_snapshot_price(&p.thscode)?
-            .unwrap_or(p.avg_cost);
-        if cur <= 0.0 {
+        let (rt, close) = {
+            let m = self.market.lock().unwrap();
+            let rt = m.latest_snapshot_price(&p.thscode)?;
+            let close = m.latest_raw_close(&p.thscode)?;
+            (rt, close)
+        };
+        let rt = rt.filter(|v| *v > 0.0).unwrap_or(p.avg_cost);
+        // 收盘价缺失（新股/停牌）时用实时价兜底
+        let close = close.filter(|v| *v > 0.0).unwrap_or(rt);
+        if p.avg_cost <= 0.0 {
             return Ok(None);
         }
-        let pnl = (cur - p.avg_cost) / p.avg_cost;
+        let pnl_close = (close - p.avg_cost) / p.avg_cost;
+        let pnl_rt = (rt - p.avg_cost) / p.avg_cost;
 
-        // 止损：亏损 ≥ 阈值 → 全部卖出
-        if pnl <= -self.config.stop_loss_pct {
+        // 止损（收盘价判定）：盘中插针不算——否则 A 股日内振幅 5% 的常态会把仓位洗在最低点
+        if pnl_close <= -self.config.stop_loss_pct {
+            log::info!(
+                "[风控] {} 收盘价 {:.2} 跌破止损线（{:.1}%）→ 清仓",
+                p.thscode, close, pnl_close * 100.0
+            );
             return Ok(Some(self.sell_intent(p, p.quantity)));
         }
-        // 止盈：盈利 ≥ 阈值 → 减半仓（至少一手）
-        if pnl >= self.config.take_profit_pct && p.quantity > 200 {
-            let qty = (p.quantity / 2 / 100 * 100).max(100);
-            return Ok(Some(self.sell_intent(p, qty)));
+        if pnl_rt <= -self.config.stop_loss_pct {
+            log::warn!(
+                "[风控] {} 盘中触及止损线（实时 {:.1}%），但收盘价 {:.2}（{:.1}%）未破线，不卖",
+                p.thscode, pnl_rt * 100.0, close, pnl_close * 100.0
+            );
         }
-        // 超期：持仓超天数且无起色（现价 < 成本）→ 全部卖出
-        if pnl < 0.0 {
+
+        // 分批止盈：+6% 减 1/3，+10% 再减 1/3（仓位太小则一次清）
+        let trim_qty = |q: u32| -> u32 {
+            if q < 300 {
+                0
+            } else {
+                ((q as f64 * self.config.trim_ratio) as u32 / 100) * 100
+            }
+        };
+        if pnl_rt >= self.config.take_profit_pct2 && !self.tp_done(p, 2)? {
+            let q = trim_qty(p.quantity);
+            if q < 100 {
+                return Ok(Some(self.sell_intent(p, p.quantity)));
+            }
+            self.mark_tp(p, 2)?;
+            return Ok(Some(self.sell_intent(p, q)));
+        }
+        if pnl_rt >= self.config.take_profit_pct && !self.tp_done(p, 1)? {
+            let q = trim_qty(p.quantity);
+            if q < 100 {
+                return Ok(Some(self.sell_intent(p, p.quantity)));
+            }
+            self.mark_tp(p, 1)?;
+            return Ok(Some(self.sell_intent(p, q)));
+        }
+
+        // 超期：持仓超天数且无起色（收盘价低于成本）→ 全部卖出
+        if pnl_close < 0.0 {
             let bought_ms = self.acct.lock().unwrap().position_bought_at(&p.thscode)?;
             if let Some(bought_ms) = bought_ms {
                 let days = (Utc::now().timestamp_millis() - bought_ms) / 86_400_000;
                 if days >= self.config.max_holding_days as i64 {
+                    log::info!("[风控] {} 持仓 {} 天未起色 → 清仓", p.thscode, days);
                     return Ok(Some(self.sell_intent(p, p.quantity)));
                 }
             }
         }
         Ok(None)
+    }
+
+    /// 该档止盈是否已执行（防同一档反复减仓）。
+    fn tp_done(&self, p: &Position, level: u8) -> finbox_store::Result<bool> {
+        Ok(self
+            .acct
+            .lock()
+            .unwrap()
+            .meta_get(&format!("tp{level}:{}", p.thscode))?
+            .is_some())
+    }
+
+    fn mark_tp(&self, p: &Position, level: u8) -> finbox_store::Result<()> {
+        self.acct
+            .lock()
+            .unwrap()
+            .meta_set(&format!("tp{level}:{}", p.thscode), &Utc::now().timestamp_millis().to_string())
     }
 
     fn sell_intent(&self, p: &Position, qty: u32) -> OrderIntent {
@@ -234,9 +377,94 @@ mod tests {
 
     #[test]
     fn regime_thresholds() {
-        assert_eq!(regime_max_total(0.7), ("risk-on", 0.60));
-        assert_eq!(regime_max_total(0.5), ("neutral", 0.40));
-        assert_eq!(regime_max_total(0.2), ("risk-off", 0.0));
+        assert_eq!(regime_max_total(0.7), ("risk-on", 0.75));
+        assert_eq!(regime_max_total(0.5), ("neutral", 0.55));
+        assert_eq!(regime_max_total(0.2), ("risk-off", 0.30));
+    }
+
+    fn put_position(acct: &finbox_store::SharedAccountDb, cash: f64, qty: u32, cost: f64) {
+        let a = acct.lock().unwrap();
+        a.get_or_init_account(cash).unwrap();
+        a.upsert_position(&Position {
+            thscode: "600519.SH".into(),
+            name: "贵州茅台".into(),
+            quantity: qty,
+            avg_cost: cost,
+        })
+        .unwrap();
+    }
+
+    fn put_snapshot(market: &SharedDb, price: f64, pct: f64) {
+        market
+            .lock()
+            .unwrap()
+            .insert_snapshots(
+                1,
+                &[SnapshotRow {
+                    thscode: "600519.SH".into(),
+                    last_price: price,
+                    price_change: price - 10.0,
+                    price_change_ratio_pct: pct,
+                    open_price: 10.0,
+                    high_price: price.max(10.0),
+                    low_price: price.min(10.0),
+                    prev_price: 10.0,
+                    volume: 1000.0,
+                    turnover: 0.0,
+                }],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn stop_loss_ignores_intraday_wick() {
+        // 盘中一度 -6%（插针），但收盘价 10.0 未破线 → 不卖（避开日内洗盘）
+        let (market, acct, rm) = setup();
+        put_position(&acct, 100000.0, 100, 10.0);
+        {
+            let m = market.lock().unwrap();
+            m.insert_daily_bars(&[finbox_store::DailyBarRow {
+                thscode: "600519.SH".into(),
+                date_ms: 1,
+                date: "2026-09-10".into(),
+                open: 10.0,
+                high: 10.2,
+                low: 9.3,
+                close: 10.0,
+                volume: 0.0,
+                turnover: 0.0,
+            }])
+            .unwrap();
+        }
+        put_snapshot(&market, 9.4, -6.0);
+        let report = rm.evaluate().unwrap();
+        assert!(report.forced_sells.is_empty(), "盘中插针不应触发止损");
+    }
+
+    #[test]
+    fn take_profit_trims_third_once_per_level() {
+        // +7% → 减 1/3；同一档不重复减
+        let (market, acct, rm) = setup();
+        put_position(&acct, 100000.0, 900, 10.0);
+        put_snapshot(&market, 10.7, 7.0);
+        let report = rm.evaluate().unwrap();
+        assert_eq!(report.forced_sells.len(), 1, "+7% 应触发第一档止盈");
+        assert_eq!(report.forced_sells[0].quantity, 300, "减 1/3");
+        let report2 = rm.evaluate().unwrap();
+        assert!(report2.forced_sells.is_empty(), "同一档不应重复减仓");
+    }
+
+    #[test]
+    fn risk_off_trims_to_target() {
+        // 涨跌家数 0% → risk-off（目标 30%），持仓占比 60% → 减仓到目标
+        let (market, acct, rm) = setup();
+        put_position(&acct, 400000.0, 60000, 10.0);
+        put_snapshot(&market, 10.0, -0.5); // 该股微跌，使涨跌家数为 0/1 → risk-off
+        let report = rm.evaluate().unwrap();
+        assert_eq!(report.regime, "risk-off");
+        assert_eq!(report.forced_sells.len(), 1, "超额仓位应被减仓");
+        // 持仓 60 万 / 总资产 100 万 = 60%；目标 30% → 卖 30 万 = 30000 股
+        assert_eq!(report.forced_sells[0].quantity, 30000);
     }
 
     #[test]

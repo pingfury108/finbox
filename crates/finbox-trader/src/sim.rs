@@ -100,6 +100,11 @@ fn buy(
     initial_capital: f64,
 ) -> Result<Execution, RejectReason> {
     check_trading_time()?;
+    // 换股冷却：当日已卖出则当日不再买入（破“卖了必买”的换股惯性）
+    let (day_start, _) = today_range_ms();
+    if let Some(code) = acct.sold_since(day_start).map_err(|e| RejectReason::Other(e.to_string()))? {
+        return Err(RejectReason::SellCooldown(code));
+    }
     if !is_valid_buy_quantity(&intent.thscode, intent.quantity) {
         return Err(RejectReason::LotSize(intent.quantity));
     }
@@ -168,6 +173,9 @@ fn buy(
             avg_cost: price,
         })
         .map_err(|e| RejectReason::Other(e.to_string()))?;
+        // 新建仓位：重置止盈档位（上一轮持仓的 +6%/+10% 标记不再适用）
+        let _ = acct.meta_del(&format!("tp1:{}", intent.thscode));
+        let _ = acct.meta_del(&format!("tp2:{}", intent.thscode));
     }
 
     acct.insert_trade(&Trade {
@@ -410,7 +418,7 @@ mod tests {
     fn buy_rejects_max_positions() {
         let (_, a) = setup();
         let mut acct = a.lock().unwrap();
-        for i in 1..=3 {
+        for i in 1..=crate::MAX_POSITIONS {
             acct.upsert_position(&Position {
                 thscode: format!("60000{i}.SH"),
                 name: "x".into(),

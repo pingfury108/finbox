@@ -60,6 +60,20 @@ impl Db {
         Ok(bars)
     }
 
+    /// 最新**真实**（未复权）收盘价：止损/超期判定用。
+    ///
+    /// 不能用 `recent_bars`（读前复权表）——成本价是真实成交价，混用复权价会误判盈亏。
+    pub fn latest_raw_close(&self, thscode: &str) -> Result<Option<f64>> {
+        // 用子查询包一层：无行时返回 NULL（query_row 直查无行会报 QueryReturnedNoRows）
+        let v = self.conn.query_row(
+            "SELECT (SELECT close_price FROM daily_bars WHERE thscode = ?
+                     ORDER BY date_ms DESC LIMIT 1)",
+            duckdb::params![thscode],
+            |r| r.get::<_, Option<f64>>(0),
+        )?;
+        Ok(v)
+    }
+
     fn query_bars(&self, table: &str, thscode: &str, n: u32) -> Result<Vec<RecentBar>> {
         let mut stmt = self.conn.prepare(
             &format!("SELECT date_ms, open_price, high_price, low_price, close_price, volume

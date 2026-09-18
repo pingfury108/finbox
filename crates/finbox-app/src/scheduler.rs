@@ -431,29 +431,21 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
     /// 定期 AI 决策：风控门控 → 初筛+LLM → 买入/卖出意图执行。
     async fn periodic_decision(&self) -> anyhow::Result<()> {
         let report = self.risk.evaluate()?;
-        // 账户门槛（熔断）与市场门槛（risk-off 目标仓位）独立判断
+        // 账户门槛（熔断）。市场门槛已下沉到风控层：risk-off 会真减仓到目标，
+        // 买入空间由 position_size 按“目标仓位 - 已用仓位”算，不再笼统拦截。
         let acct_ok = report.can_buy;
-        let mkt_ok = report.max_total_pct > 0.0;
         let npos = self.acct.lock().unwrap().positions().map(|p| p.len()).unwrap_or(0);
         log::info!(
             "[{}][决策] 市场{} 目标仓位{:.0}% 账户可买={} 强制卖出{}笔 当前持仓{}只",
             self.name, report.regime, report.max_total_pct * 100.0, acct_ok, report.forced_sells.len(), npos
         );
-        // 风控强制卖出优先执行
+        // 风控强制卖出优先执行（止损/止盈/超期/risk-off 减仓）
         self.execute_sells(&report.forced_sells).await?;
 
-        // 门槛不满足则跳过买入
-        if !acct_ok || !mkt_ok {
-            let reason = if !acct_ok {
-                "账户熔断/回撤中"
-            } else if report.regime == "risk-off" {
-                "市场走弱(risk-off)，只减不买"
-            } else {
-                "市场中性，暂不追买"
-            };
-            log::info!("[{}][决策] 空仓{}，{}，本轮不买入", self.name, if npos == 0 { "(空仓)" } else { "" }, reason);
-            // 留痕：被拦截的轮次也写入 AI 建议记录
-            self.decision.log_skip("hold", &format!("{}，当前持仓{}只", reason, npos));
+        // 仅熔断拦截买入（risk-off 时仓位上限由 position_size 按剩余空间控制）
+        if !acct_ok {
+            log::info!("[{}][决策] {}，本轮不买入", self.name, report.note);
+            self.decision.log_skip("hold", &format!("{}，当前持仓{}只", report.note, npos));
             return Ok(());
         }
 
@@ -538,19 +530,39 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
         }
         // read_acct_conf 内部会自行 lock acct，必须在持锁前调用（std Mutex 不可重入，否则自锁死锁）
         let conf = read_acct_conf(&self.cfg, &self.acct);
-        let acct = self.acct.lock().unwrap();
-        let account = match acct.get_or_init_account(conf.initial_capital) {
-            Ok(a) => a,
-            Err(_) => return 0,
+        // 账户数据（取完即释锁，下面对行情还需再锁 market —— 不跨库同时持锁）
+        let (cash, total_est, held) = {
+            let acct = self.acct.lock().unwrap();
+            let account = match acct.get_or_init_account(conf.initial_capital) {
+                Ok(a) => a,
+                Err(_) => return 0,
+            };
+            let total_est = acct.total_asset_estimate(&account).unwrap_or(account.cash);
+            let held: Vec<(String, u32, f64)> = acct
+                .positions()
+                .unwrap_or_default()
+                .iter()
+                .map(|p| (p.thscode.clone(), p.quantity, p.avg_cost))
+                .collect();
+            (account.cash, total_est, held)
         };
-        let total_est = acct.total_asset_estimate(&account).unwrap_or(account.cash);
-        let positions = acct.positions().unwrap_or_default();
-        if positions.len() >= 3 && !positions.iter().any(|p| p.thscode == intent.thscode) {
+        if held.len() >= 4 && !held.iter().any(|(c, _, _)| c == &intent.thscode) {
             return 0;
         }
-        let single_max = total_est * 0.20;
-        let total_room = (max_total_pct * total_est).max(0.0);
-        let budget = single_max.min(total_room).min(account.cash);
+        // 当前持仓市值（真实价优先，无快照用成本）
+        let mv: f64 = {
+            let m = self.market.lock().unwrap();
+            held.iter()
+                .map(|(code, qty, cost)| {
+                    let px = m.latest_snapshot_price(code).ok().flatten().unwrap_or(*cost);
+                    px * *qty as f64
+                })
+                .sum()
+        };
+        // 目标仓位上限下的**剩余**可买空间（原实现漏扣已用仓位，使 regime 上限形同虚设）
+        let total_room = (max_total_pct * total_est - mv).max(0.0);
+        let single_max = total_est * 0.25;
+        let budget = single_max.min(total_room).min(cash);
         (budget / price / 100.0).floor() as u32 * 100
     }
 

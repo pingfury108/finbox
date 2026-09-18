@@ -53,6 +53,8 @@ pub enum RejectReason {
     PositionLimit(f64),
     #[error("持股数量超限: 上限 {0} 只")]
     MaxPositions(usize),
+    #[error("换股冷却: 今日已卖出 {0}，当日不再买入（防卖了必买的换股惯性）")]
+    SellCooldown(String),
     #[error("无有效行情: {0}")]
     NoPrice(String),
     #[error("买入价超出涨停价")]
