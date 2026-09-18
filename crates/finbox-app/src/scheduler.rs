@@ -38,6 +38,12 @@ struct AcctConf {
     watchlist: Vec<String>,
     candidate_count: usize,
     risk: RiskConfig,
+    /// 滑点比例
+    slippage_pct: f64,
+    /// 单票仓位上限（比例）
+    max_position_pct: f64,
+    /// 最大持仓只数
+    max_positions: usize,
 }
 
 pub struct Scheduler {
@@ -82,6 +88,20 @@ impl Scheduler {
                 }
             });
             log::info!("[数据] 前复权表为空，后台全量重建中（期间 AI 分析暂用原始价）");
+        }
+
+        // 行业归属自检：无数据（新库/首次）则后台同步（供候选/持仓行业去重）
+        if self.market.lock().unwrap().industry_coverage().map(|(i, _)| i == 0).unwrap_or(false) {
+            let collector = finbox_collector::Collector::new(
+                hithink_sdk::Client::new(self.cfg.hithink_api_key.clone())?,
+                self.market.clone(),
+            );
+            tokio::spawn(async move {
+                if let Err(e) = collector.sync_industries().await {
+                    log::error!("[数据] 行业归属同步失败: {e}");
+                }
+            });
+            log::info!("[数据] 行业归属为空，后台同步中（约 90 个一级行业）");
         }
 
         let mut handles = Vec::new();
@@ -152,6 +172,8 @@ impl Scheduler {
                         self.collector.upsert_trading_days(&days).await?;
                         self.collector.sync_daily_bars(std::path::Path::new("data/dumps"), &days).await?;
                         self.collector.import_adjustment_factors(std::path::Path::new("data/dumps")).await?;
+                        // 行业归属（供候选/持仓行业去重）：每日盘前刷新一次
+                        let _ = self.collector.sync_industries().await;
                         anyhow::Ok(days.item.len())
                     }.await;
                     match sync_result {
@@ -255,7 +277,8 @@ fn build_account_ctx(
         },
         conf.watchlist.clone(),
     );
-    let broker = SimBroker::new(market.clone(), acct.clone(), conf.initial_capital);
+    let broker = SimBroker::new(market.clone(), acct.clone(), conf.initial_capital)
+        .with_slippage(conf.slippage_pct);
     let risk = RiskManager::new(market.clone(), acct.clone(), conf.risk);
     AccountCtx { cfg: cfg.clone(), name: name.into(), market, acct, broker, decision, risk, closed_today: false }
 }
@@ -276,11 +299,29 @@ fn read_acct_conf(cfg: &Config, acct: &finbox_store::SharedAccountDb) -> AcctCon
         .flatten()
         .unwrap_or_default();
     let count = get("candidate_count", cfg.candidate_count as f64) as usize;
+    // 风控参数：账户库 meta 优先（Web 参数页可改，热生效），否则用默认值
+    let d = RiskConfig::default();
+    let risk = RiskConfig {
+        stop_loss_pct: get("stop_loss_pct", d.stop_loss_pct),
+        hard_stop_loss_pct: get("hard_stop_loss_pct", d.hard_stop_loss_pct),
+        take_profit_pct: get("take_profit_pct", d.take_profit_pct),
+        take_profit_pct2: get("take_profit_pct2", d.take_profit_pct2),
+        trim_ratio: get("trim_ratio", d.trim_ratio),
+        max_holding_days: get("max_holding_days", d.max_holding_days as f64) as u32,
+        fuse_drawdown_pct: get("fuse_drawdown_pct", d.fuse_drawdown_pct),
+        fuse_days: get("fuse_days", d.fuse_days as f64) as u32,
+        fuse_target_position: get("fuse_target_position", d.fuse_target_position),
+        profit_target_pct: get("profit_target_pct", d.profit_target_pct),
+        profit_target_position: get("profit_target_position", d.profit_target_position),
+    };
     AcctConf {
         initial_capital: get("initial_capital", cfg.initial_capital),
         watchlist: watch.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
         candidate_count: count.max(1),
-        risk: RiskConfig::default(),
+        risk,
+        slippage_pct: get("slippage_pct", 0.0005),
+        max_position_pct: get("max_position_pct", 0.25),
+        max_positions: get("max_positions", 4.0) as usize,
     }
 }
 
@@ -420,6 +461,7 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
 
     /// 盘中风控：止损/止盈/超期，触发生成卖出并执行。
     async fn intraday_risk(&self) -> anyhow::Result<()> {
+        self.refresh_risk_conf();
         let report = self.risk.evaluate()?;
         if !report.forced_sells.is_empty() {
             log::info!("[{}][盘中风控] 强制卖出 {} 笔", self.name, report.forced_sells.len());
@@ -430,6 +472,7 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
 
     /// 定期 AI 决策：风控门控 → 初筛+LLM → 买入/卖出意图执行。
     async fn periodic_decision(&self) -> anyhow::Result<()> {
+        self.refresh_risk_conf();
         let report = self.risk.evaluate()?;
         // 账户门槛（熔断）。市场门槛已下沉到风控层：risk-off 会真减仓到目标，
         // 买入空间由 position_size 按“目标仓位 - 已用仓位”算，不再笼统拦截。
@@ -501,6 +544,11 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
         Ok(())
     }
 
+    /// 从账户库 meta 刷新风控参数（Web 参数页改后热生效）。
+    fn refresh_risk_conf(&self) {
+        self.risk.set_config(read_acct_conf(&self.cfg, &self.acct).risk);
+    }
+
     /// 执行买入：数量由系统按仓位约束计算。返回 Some(拒单原因) 表示未成交。
     async fn execute_buy(&self, intent: &finbox_core::OrderIntent, max_total_pct: f64) -> anyhow::Result<Option<String>> {
         let qty = self.position_size(intent, max_total_pct).await;
@@ -546,7 +594,7 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
                 .collect();
             (account.cash, total_est, held)
         };
-        if held.len() >= 4 && !held.iter().any(|(c, _, _)| c == &intent.thscode) {
+        if held.len() >= conf.max_positions && !held.iter().any(|(c, _, _)| c == &intent.thscode) {
             return 0;
         }
         // 当前持仓市值（真实价优先，无快照用成本）
@@ -561,7 +609,7 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
         };
         // 目标仓位上限下的**剩余**可买空间（原实现漏扣已用仓位，使 regime 上限形同虚设）
         let total_room = (max_total_pct * total_est - mv).max(0.0);
-        let single_max = total_est * 0.25;
+        let single_max = total_est * conf.max_position_pct;
         let budget = single_max.min(total_room).min(cash);
         (budget / price / 100.0).floor() as u32 * 100
     }

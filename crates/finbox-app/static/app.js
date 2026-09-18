@@ -385,7 +385,7 @@
     html += '<span class="risk-item">仓位 <b>' + fmt(r.position_pct, 1) + '%</b></span>';
     html += '</div>';
     if (r.positions && r.positions.length) {
-      html += '<table class="tbl" style="margin-top:10px"><thead><tr><th>标的</th><th>现价</th><th>成本</th><th>距止损线(-5%)</th><th>距止盈线(+15%)</th></tr></thead><tbody>';
+      html += '<table class="tbl" style="margin-top:10px"><thead><tr><th>标的</th><th>现价</th><th>成本</th><th>距止损线(-' + fmt(r.stop_loss_pct || 5, 1) + '%)</th><th>距止盈线(+' + fmt(r.take_profit_pct || 6, 1) + '%)</th></tr></thead><tbody>';
       html += r.positions.map(p => {
         const stopCls = p.to_stop_pct < 2 ? 'up' : '';
         // 距止盈线统一为正值距离（还差多少到止盈），与止损线同口径

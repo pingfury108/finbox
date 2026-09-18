@@ -245,6 +245,13 @@ CREATE TABLE IF NOT EXISTS snapshots (
     PRIMARY KEY (ts_ms, thscode)
 );
 CREATE INDEX IF NOT EXISTS ix_snapshots_thscode_ts ON snapshots (thscode, ts_ms);
+-- 行业归属（同花顺一级行业指数成分股）：“伪分散”用真行业而非板块近似
+CREATE TABLE IF NOT EXISTS industry_members (
+    thscode       VARCHAR NOT NULL,
+    industry_code VARCHAR NOT NULL,
+    industry_name VARCHAR NOT NULL,
+    PRIMARY KEY (thscode, industry_code)
+);
 "#;
 
 /// 账户库表结构（每账户独立，读写）。

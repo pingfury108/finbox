@@ -57,6 +57,19 @@ pub fn board_allowed(initial_capital: f64, thscode: &str) -> bool {
     }
 }
 
+/// 板块名（用于集中度约束：同板块持仓过多 = 伪分散）。
+pub fn board_name(thscode: &str) -> &'static str {
+    if is_star_board(thscode) {
+        "科创板"
+    } else if is_bj_board(thscode) {
+        "北交所"
+    } else if is_gem_board(thscode) {
+        "创业板"
+    } else {
+        "主板"
+    }
+}
+
 /// 买入数量校验：科创板 ≥200 股（之后 1 股递增）；其他板块 100 整手。
 pub fn is_valid_buy_quantity(thscode: &str, qty: u32) -> bool {
     if qty == 0 {

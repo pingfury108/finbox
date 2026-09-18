@@ -85,7 +85,7 @@ impl DecisionEngine {
         }
         info!("初筛完成：{} 只候选", candidates.len());
         for c in &candidates {
-            info!("  候选 {} {} 现价{:.2} 涨幅{:.2}% 评分{:.2}", c.thscode, c.name, c.price, c.pct, c.score);
+            info!("  候选 {} {} 现价{:.2} 涨幅{:.2}% {}", c.thscode, c.name, c.price, c.pct, c.reason);
         }
         let ctx = {
             let (m, a) = (self.market.clone(), self.acct.clone());

@@ -156,6 +156,48 @@ impl Collector {
 
     /// 采集几大 A 股指数日 K（复用 daily_bars 表，thscode 天然区分个股/指数）。
     /// 返回写入行数。
+    /// 同步行业归属（同花顺一级行业指数成分股）。行业结构变化极低，每日盘前一次。
+    ///
+    /// 用于“伪分散”修正：同行业持仓/候选过多 = 实际是一只股票的风险。
+    pub async fn sync_industries(&self) -> Result<u64> {
+        let list = self.client.ths_index_list(Some("industry")).await?;
+        let items = list
+            .get("item")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        // 只取一级行业（881xxx）：二级（884xxx）会让同一股票归属多重行业
+        let l1: Vec<(String, String)> = items
+            .iter()
+            .filter_map(|it| {
+                let code = it.get("thscode")?.as_str()?.to_string();
+                let name = it.get("name")?.as_str()?.to_string();
+                code.starts_with("881").then_some((code, name))
+            })
+            .collect();
+        let mut total = 0u64;
+        for (code, name) in &l1 {
+            match self.client.ths_index_constituents(code).await {
+                Ok(v) => {
+                    let codes: Vec<String> = v
+                        .get("item")
+                        .and_then(|x| x.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|c| c.get("thscode").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let n = self.db.lock().unwrap().replace_industry(code, name, &codes)?;
+                    total += n;
+                }
+                Err(e) => log::warn!("[数据] 行业 {name}({code}) 成分股获取失败: {e}"),
+            }
+        }
+        info!("[数据] 行业归属同步完成: {} 个行业 / {total} 条成分", l1.len());
+        Ok(total)
+    }
+
     pub async fn sync_index_bars(&self, days: u32) -> Result<u64> {
         // 几大指数：上证/深成/创业板/沪深300/中证500
         const INDEXES: &[(&str, &str)] = &[

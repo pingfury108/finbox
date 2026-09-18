@@ -5,16 +5,17 @@
 //! - 整手 100 股；T+1（当日买入次日可卖）
 //! - 涨跌停：主板 10% / 创业科创 20% / 北交所 30%，涨停禁买、跌停禁卖
 //! - 费用：佣金万 2.5（最低 5 元，双边）+ 印花税 0.05%（卖出）+ 过户费 0.001%（双边）
-//! - 硬护栏：单票 ≤20% 总资产，持股 ≤3 只
+//! - 滑点：默认 0.05%（买入抬价/卖出压价），模拟真实冲击成本
+//! - 硬护栏：单票 ≤25% 总资产，持股 ≤4 只，同板块 ≤2 只，当日卖出后不再买入
 //!
-//! 成交价 = 最新行情快照价（盘中），无快照回退昨收价。钱是假的，价格是真的。
+//! 成交价 = 最新行情快照价（盘中）加减滑点，无快照回退昨收价。钱是假的，价格是真的。
 //!
 //! 双库架构：行情（价格/昨收）读 market 库，账户（持仓/现金/流水）读写 account 库。
 //! 铁律：**不同时持有两把锁** —— 先锁 market 取价，再锁 account 交易。
 
 use chrono::{Datelike, Local, Timelike};
 use finbox_core::rules::{
-    board_allowed, is_trading_time, is_valid_buy_quantity, is_valid_sell_quantity,
+    board_allowed, board_name, is_trading_time, is_valid_buy_quantity, is_valid_sell_quantity,
     limit_down_price, limit_up_price, round_price, COMMISSION_MIN, COMMISSION_RATE,
     STAMP_RATE, TRANSFER_RATE,
 };
@@ -23,16 +24,27 @@ use finbox_store::SharedDb;
 
 use crate::{Broker, BrokerError};
 
+/// 同一（一级）行业最大持仓数（伪分散修正：同行业 4 只 ≈ 1 只）
+const MAX_PER_INDUSTRY: usize = 2;
+
 /// 模拟盘券商。持有行情库（只读）与账户库（读写）。
 pub struct SimBroker {
     market: SharedDb,
     acct: finbox_store::SharedAccountDb,
     initial_capital: f64,
+    /// 滑点比例（买卖各按此比例向不利方向成交）
+    slippage_pct: f64,
 }
 
 impl SimBroker {
     pub fn new(market: SharedDb, acct: finbox_store::SharedAccountDb, initial_capital: f64) -> Self {
-        Self { market, acct, initial_capital }
+        Self { market, acct, initial_capital, slippage_pct: 0.0005 }
+    }
+
+    /// 按账户配置覆盖滑点（Web 参数页可改）。
+    pub fn with_slippage(mut self, slippage_pct: f64) -> Self {
+        self.slippage_pct = slippage_pct.max(0.0);
+        self
     }
 }
 
@@ -52,10 +64,41 @@ impl Broker for SimBroker {
             };
             (price, prev)
         };
+        // 同行业持仓数预计算（锁序：acct 读持仓→释放→market 查行业，避免两库同时持锁）
+        let same_industry = if intent.side == OrderSide::Buy {
+            let held: Vec<String> = self
+                .acct
+                .lock()
+                .unwrap()
+                .positions()
+                .map(|p| p.into_iter().map(|x| x.thscode).collect())
+                .unwrap_or_default();
+            let m = self.market.lock().unwrap();
+            let ind = m.industry_of(&intent.thscode).ok().flatten();
+            match ind {
+                Some(ind) => held
+                    .iter()
+                    .filter(|c| m.industry_of(c).ok().flatten().as_deref() == Some(ind.as_str()))
+                    .count(),
+                None => 0,
+            }
+        } else {
+            0
+        };
+        if same_industry >= MAX_PER_INDUSTRY {
+            let ind = self.market.lock().unwrap().industry_of(&intent.thscode).ok().flatten()
+                .unwrap_or_else(|| board_name(&intent.thscode).to_string());
+            return Err(BrokerError::Rejected(RejectReason::BoardConcentration(ind, MAX_PER_INDUSTRY)));
+        }
         let mut acct = self.acct.lock().unwrap();
+        // 滑点：买入抬价、卖出压价（不给理想成交价）
+        let fill_price = match intent.side {
+            OrderSide::Buy => round_price(price * (1.0 + self.slippage_pct)),
+            OrderSide::Sell => round_price(price * (1.0 - self.slippage_pct)),
+        };
         let exec = match intent.side {
-            OrderSide::Buy => buy(&mut acct, &intent, price, prev_close, self.initial_capital),
-            OrderSide::Sell => sell(&mut acct, &intent, price, prev_close, self.initial_capital),
+            OrderSide::Buy => buy(&mut acct, &intent, fill_price, prev_close, self.initial_capital),
+            OrderSide::Sell => sell(&mut acct, &intent, fill_price, prev_close, self.initial_capital),
         }?;
         Ok(exec)
     }
@@ -140,8 +183,8 @@ fn buy(
         return Err(RejectReason::PositionLimit(crate::MAX_POSITION_PCT * 100.0));
     }
     if position.is_none() {
-        let held = acct.positions().map_err(|e| RejectReason::Other(e.to_string()))?.len();
-        if held >= crate::MAX_POSITIONS {
+        let held = acct.positions().map_err(|e| RejectReason::Other(e.to_string()))?;
+        if held.len() >= crate::MAX_POSITIONS {
             return Err(RejectReason::MaxPositions(crate::MAX_POSITIONS));
         }
     }

@@ -422,12 +422,15 @@ pub async fn risk_status(
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let acct = accounts::open_account(&st.cfg.data_dir, &name).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
-    let (positions, cash, fuse_until, peak) = {
+    let (positions, cash, fuse_until, peak, sl, tp) = {
         let db = acct.lock().unwrap();
         let ac = db.get_or_init_account(st.cfg.initial_capital).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
         let fuse = db.meta_get("fuse_until_ms").ok().flatten().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
         let peak = db.meta_get("peak_asset").ok().flatten().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-        (db.positions().unwrap_or_default(), ac.cash, fuse, peak)
+        let num = |k: &str, d: f64| db.meta_get(k).ok().flatten().and_then(|s| s.parse::<f64>().ok()).unwrap_or(d);
+        let sl = num("stop_loss_pct", 0.05);
+        let tp = num("take_profit_pct", 0.06);
+        (db.positions().unwrap_or_default(), ac.cash, fuse, peak, sl, tp)
     };
     let mut rows = Vec::new();
     let mut mv = 0.0;
@@ -436,8 +439,8 @@ pub async fn risk_status(
         for p in &positions {
             let price = m.latest_snapshot_price(&p.thscode).ok().flatten().unwrap_or(p.avg_cost);
             mv += price * p.quantity as f64;
-            let to_stop = if p.avg_cost > 0.0 { (price / (p.avg_cost * 0.95) - 1.0) * 100.0 } else { 0.0 };
-            let to_profit = if p.avg_cost > 0.0 { (price / (p.avg_cost * 1.15) - 1.0) * 100.0 } else { 0.0 };
+            let to_stop = if p.avg_cost > 0.0 { (price / (p.avg_cost * (1.0 - sl)) - 1.0) * 100.0 } else { 0.0 };
+            let to_profit = if p.avg_cost > 0.0 { (price / (p.avg_cost * (1.0 + tp)) - 1.0) * 100.0 } else { 0.0 };
             rows.push(RiskRow { thscode: p.thscode.clone(), name: resolve_name(&m, &p.thscode, &p.name), price, avg_cost: p.avg_cost, to_stop_pct: to_stop, to_profit_pct: to_profit });
         }
     }
@@ -446,6 +449,8 @@ pub async fn risk_status(
     let drawdown = if peak > 0.0 { (peak - total) / peak * 100.0 } else { 0.0 };
     Ok(Json(serde_json::json!({
         "fuse_active": fuse_until > now_ms,
+        "stop_loss_pct": sl * 100.0,
+        "take_profit_pct": tp * 100.0,
         "fuse_until_ms": fuse_until,
         "peak": peak,
         "total": total,

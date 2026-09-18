@@ -220,10 +220,35 @@ async fn account_settings_page(State(st): State<WebState>, axum::extract::Path(n
   <label>自选池(逗号分隔) <input name=watchlist value="{wl}"></label>
   <label>决策间隔(分钟) <input name=decision_interval_minutes value="{di}" type=number></label>
   <label>候选股数量 <input name=candidate_count value="{cc}" type=number></label>
+  <h3 style="margin:16px 0 4px">风控参数</h3>
+  <label>止损线(小数, -5% 填 0.05) <input name=stop_loss_pct value="{sl}" type=number step=0.005 min=0></label>
+  <label>尾部硬止损(小数, 盘中跌破无条件清) <input name=hard_stop_loss_pct value="{hsl}" type=number step=0.005 min=0></label>
+  <label>止盈一档(小数, 减 {trim}%) <input name=take_profit_pct value="{tp1}" type=number step=0.005 min=0></label>
+  <label>止盈二档(小数, 再减 {trim}%) <input name=take_profit_pct2 value="{tp2}" type=number step=0.005 min=0></label>
+  <label>止盈减仓比例(0.33=1/3) <input name=trim_ratio value="{trim}" type=number step=0.05 min=0 max=1></label>
+  <label>持仓超期天数 <input name=max_holding_days value="{mhd}" type=number min=1></label>
+  <label>熔断回撤线(小数) <input name=fuse_drawdown_pct value="{fdp}" type=number step=0.005 min=0></label>
+  <label>熔断持续天数 <input name=fuse_days value="{fd}" type=number min=0></label>
+  <label>熔断目标仓位(小数) <input name=fuse_target_position value="{ftp}" type=number step=0.05 min=0 max=1></label>
+  <label>收益目标(小数, 0.05=+5%) <input name=profit_target_pct value="{ptp}" type=number step=0.005 min=0></label>
+  <label>达标后仓位上限(小数) <input name=profit_target_position value="{ptpos}" type=number step=0.05 min=0 max=1></label>
+  <h3 style="margin:16px 0 4px">仓位与执行</h3>
+  <label>单票仓位上限(小数) <input name=max_position_pct value="{mpp}" type=number step=0.05 min=0.05 max=1></label>
+  <label>最大持仓只数 <input name=max_positions value="{mp}" type=number min=1 max=10></label>
+  <label>滑点比例(小数, 0.0005=0.05%) <input name=slippage_pct value="{sp}" type=number step=0.0005 min=0 max=0.01></label>
   <button type=submit>保存</button>
 </form></section>"#,
         name = esc(&name), capital = esc(&capital), wl = esc(&get("watchlist", "")),
-        di = esc(&get("decision_interval_minutes", "30")), cc = esc(&get("candidate_count", "5")));
+        di = esc(&get("decision_interval_minutes", "30")), cc = esc(&get("candidate_count", "5")),
+        sl = esc(&get("stop_loss_pct", "0.05")), hsl = esc(&get("hard_stop_loss_pct", "0.08")),
+        tp1 = esc(&get("take_profit_pct", "0.06")), tp2 = esc(&get("take_profit_pct2", "0.10")),
+        trim = esc(&get("trim_ratio", "0.33")), mhd = esc(&get("max_holding_days", "20")),
+        fdp = esc(&get("fuse_drawdown_pct", "0.05")), fd = esc(&get("fuse_days", "5")),
+        ftp = esc(&get("fuse_target_position", "0.30")),
+        ptp = esc(&get("profit_target_pct", "0.05")),
+        ptpos = esc(&get("profit_target_position", "0.40")),
+        mpp = esc(&get("max_position_pct", "0.25")), mp = esc(&get("max_positions", "4")),
+        sp = esc(&get("slippage_pct", "0.0005")));
     layout(&format!("{name} · 参数"), "account", &body)
 }
 
@@ -233,6 +258,20 @@ struct AccountSettingsForm {
     watchlist: String,
     decision_interval_minutes: u64,
     candidate_count: usize,
+    stop_loss_pct: f64,
+    hard_stop_loss_pct: f64,
+    take_profit_pct: f64,
+    take_profit_pct2: f64,
+    trim_ratio: f64,
+    max_holding_days: u32,
+    fuse_drawdown_pct: f64,
+    fuse_days: u32,
+    fuse_target_position: f64,
+    profit_target_pct: f64,
+    profit_target_position: f64,
+    max_position_pct: f64,
+    max_positions: usize,
+    slippage_pct: f64,
 }
 
 /// 保存账户参数（写账户库 meta，热生效）。
@@ -251,6 +290,29 @@ async fn account_settings_save(
     db.meta_set("watchlist", &form.watchlist).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     db.meta_set("decision_interval_minutes", &form.decision_interval_minutes.to_string()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     db.meta_set("candidate_count", &form.candidate_count.to_string()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // 风控/仓位/执行参数（热生效：调度器每轮决策前读）
+    for (k, v) in [
+        ("stop_loss_pct", form.stop_loss_pct),
+        ("hard_stop_loss_pct", form.hard_stop_loss_pct),
+        ("take_profit_pct", form.take_profit_pct),
+        ("take_profit_pct2", form.take_profit_pct2),
+        ("trim_ratio", form.trim_ratio),
+        ("fuse_drawdown_pct", form.fuse_drawdown_pct),
+        ("fuse_target_position", form.fuse_target_position),
+        ("profit_target_pct", form.profit_target_pct),
+        ("profit_target_position", form.profit_target_position),
+        ("max_position_pct", form.max_position_pct),
+        ("slippage_pct", form.slippage_pct),
+    ] {
+        db.meta_set(k, &v.to_string()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    for (k, v) in [
+        ("max_holding_days", form.max_holding_days),
+        ("fuse_days", form.fuse_days),
+        ("max_positions", form.max_positions as u32),
+    ] {
+        db.meta_set(k, &v.to_string()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
     // 同步账户表初始资金（仅当账户现金未动过时）
     let _ = db.get_or_init_account(form.initial_capital);
     Ok(Redirect::to(&format!("/account/{name}")))

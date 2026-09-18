@@ -127,8 +127,10 @@ pub struct ScreenRow {
     /// 近 5 日涨幅（%）
     pub chg5: f64,
     pub volume_ratio: Option<f64>,
-    /// 当前价在 60 日高低点位置（0~1）
+    /// 当前价在 60 日高低点位置（0~1），基于前复权序列（自洽口径）
     pub position: Option<f64>,
+    /// 前复权最新收盘价（均线/位置等分析用；`price` 才是真实实时价）
+    pub adj_close: f64,
 }
 
 impl Db {
@@ -163,10 +165,10 @@ impl Db {
             )
             SELECT p.thscode, p.last_close, p.last_turnover, p.ma20, p.ma60,
                    p.min60, p.max60, p.close6, p.avg5_turnover,
-                   s.price_change_ratio_pct
+                   s.price_change_ratio_pct, s.last_price, s.turnover
             FROM per p
             LEFT JOIN (
-                SELECT thscode, price_change_ratio_pct, turnover
+                SELECT thscode, price_change_ratio_pct, last_price, turnover
                 FROM snapshots
                 QUALIFY ROW_NUMBER() OVER (PARTITION BY thscode ORDER BY ts_ms DESC) = 1
             ) s ON p.thscode = s.thscode
@@ -184,10 +186,16 @@ impl Db {
             let close6: Option<f64> = r.get(7)?;
             let avg5_turnover: Option<f64> = r.get(8)?;
             let pct: Option<f64> = r.get(9)?;
+            // 实时快照价/成交额（真实价）；快照缺失（非交易时段/新股）回退日K
+            let rt_price: Option<f64> = r.get(10)?;
+            let rt_turnover: Option<f64> = r.get(11)?;
             let Some(last_close) = last_close else { continue };
+            let price = rt_price.filter(|v| *v > 0.0).unwrap_or(last_close);
             let pct = pct.unwrap_or(0.0);
-            let chg5 = close6.map(|c6| (last_close / c6 - 1.0) * 100.0).unwrap_or(0.0);
-            let volume_ratio = match (avg5_turnover, last_turnover) {
+            let chg5 = close6.map(|c6| (price / c6 - 1.0) * 100.0).unwrap_or(0.0);
+            // 量比：今日累计成交额（实时）/ 前 5 日日均成交额；无快照回退日K口径
+            let today_turnover = rt_turnover.or(last_turnover);
+            let volume_ratio = match (avg5_turnover, today_turnover) {
                 (Some(a), Some(l)) if a > 0.0 => Some(l / a),
                 _ => None,
             };
@@ -197,17 +205,58 @@ impl Db {
             };
             out.push(ScreenRow {
                 thscode: r.get(0)?,
-                price: last_close,
+                price,
                 pct,
-                turnover: last_turnover.unwrap_or(0.0),
+                turnover: today_turnover.unwrap_or(0.0),
                 ma20: ma20.unwrap_or(0.0),
                 ma60: ma60.unwrap_or(0.0),
                 chg5,
                 volume_ratio,
                 position,
+                adj_close: last_close,
             });
         }
         Ok(out)
+    }
+
+    // ---------- 行业归属 ----------
+
+    /// 写入某行业的成分股（同花顺行业指数变动极低，按行业覆盖重写）。
+    pub fn replace_industry(&self, industry_code: &str, industry_name: &str, codes: &[String]) -> Result<u64> {
+        self.conn.execute(
+            "DELETE FROM industry_members WHERE industry_code = ?",
+            duckdb::params![industry_code],
+        )?;
+        let mut n = 0u64;
+        for code in codes {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO industry_members (thscode, industry_code, industry_name) VALUES (?, ?, ?)",
+                duckdb::params![code, industry_code, industry_name],
+            )?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// 某标的的行业名（无记录返回 None）。
+    pub fn industry_of(&self, thscode: &str) -> Result<Option<String>> {
+        let v = self.conn.query_row(
+            "SELECT (SELECT industry_name FROM industry_members WHERE thscode = ? LIMIT 1)",
+            duckdb::params![thscode],
+            |r| r.get::<_, Option<String>>(0),
+        )?;
+        Ok(v)
+    }
+
+    /// 行业覆盖度：(行业数, 股票数)。
+    pub fn industry_coverage(&self) -> Result<(i64, i64)> {
+        let (i, s) = self.conn.query_row(
+            "SELECT (SELECT COUNT(DISTINCT industry_code) FROM industry_members),
+                    (SELECT COUNT(DISTINCT thscode) FROM industry_members)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((i, s))
     }
 
     /// 市场涨跌家数：上涨家数 / 总家数（基于最新快照涨跌幅）。

@@ -21,6 +21,8 @@ use finbox_store::SharedDb;
 pub struct RiskConfig {
     /// 单票止损阈值（亏损比例，**收盘价**判定）
     pub stop_loss_pct: f64,
+    /// 尾部硬止损：盘中实时价跌破此比例无条件清仓（补收盘价判定的跳空敲口）
+    pub hard_stop_loss_pct: f64,
     /// 止盈第一档（减 1/3）
     pub take_profit_pct: f64,
     /// 止盈第二档（再减 1/3）
@@ -33,18 +35,28 @@ pub struct RiskConfig {
     pub fuse_drawdown_pct: f64,
     /// 熔断持续天数
     pub fuse_days: u32,
+    /// 熔断时降到目标仓位（不只停买，避免满仓挨跌）
+    pub fuse_target_position: f64,
+    /// 账户收益目标（达到后降仓锁利）
+    pub profit_target_pct: f64,
+    /// 达标后的仓位上限
+    pub profit_target_position: f64,
 }
 
 impl Default for RiskConfig {
     fn default() -> Self {
         Self {
             stop_loss_pct: 0.05,
+            hard_stop_loss_pct: 0.08,
             take_profit_pct: 0.06,
             take_profit_pct2: 0.10,
             trim_ratio: 1.0 / 3.0,
             max_holding_days: 20,
             fuse_drawdown_pct: 0.05,
             fuse_days: 5,
+            fuse_target_position: 0.30,
+            profit_target_pct: 0.05,
+            profit_target_position: 0.40,
         }
     }
 }
@@ -60,6 +72,8 @@ pub struct RiskReport {
     pub max_total_pct: f64,
     /// 市场状态：risk-on / neutral / risk-off
     pub regime: String,
+    /// 是否已达到账户收益目标（降仓锁利中）
+    pub profit_reached: bool,
     /// 备注（熔断状态等）
     pub note: String,
 }
@@ -81,19 +95,31 @@ fn regime_max_total(breadth_ratio: f64) -> (&'static str, f64) {
 pub struct RiskManager {
     pub market: SharedDb,
     pub acct: finbox_store::SharedAccountDb,
-    pub config: RiskConfig,
+    /// 风控参数（Mutex 包裹：Web 参数页改后可热生效）
+    config: std::sync::Mutex<RiskConfig>,
     /// 进程内缓存的历史总资产峰值
     peak_cache: AtomicU64,
 }
 
 impl RiskManager {
     pub fn new(market: SharedDb, acct: finbox_store::SharedAccountDb, config: RiskConfig) -> Self {
-        Self { market, acct, config, peak_cache: AtomicU64::new(0) }
+        Self { market, acct, config: std::sync::Mutex::new(config), peak_cache: AtomicU64::new(0) }
+    }
+
+    /// 更新风控参数（每轮决策前由调度器从账户库 meta 刷新）。
+    pub fn set_config(&self, cfg: RiskConfig) {
+        *self.config.lock().unwrap() = cfg;
+    }
+
+    /// 当前参数快照。
+    pub fn config(&self) -> RiskConfig {
+        self.config.lock().unwrap().clone()
     }
 
     /// 运行一轮风控评估。
     pub fn evaluate(&self) -> finbox_store::Result<RiskReport> {
         let mut report = RiskReport::default();
+        let cfg = self.config();
 
         // 1. 市场状态（涨跌家数，读 market）
         let (up, total) = self.market.lock().unwrap().market_breadth()?;
@@ -116,19 +142,38 @@ impl RiskManager {
         let peak = self.current_peak();
 
         let now_ms = Utc::now().timestamp_millis();
-        if peak > 0.0 && (peak - total_asset) / peak >= self.config.fuse_drawdown_pct {
+        let drawdown = if peak > 0.0 { (peak - total_asset) / peak } else { 0.0 };
+        if peak > 0.0 && drawdown >= cfg.fuse_drawdown_pct {
             if fuse_until_ms > now_ms {
                 report.can_buy = false;
                 let mins_left = (fuse_until_ms - now_ms) / 60000;
-                report.note = format!("账户回撤 {:.1}% 熔断中，剩余约 {mins_left} 分钟", self.config.fuse_drawdown_pct * 100.0);
+                report.note = format!("账户回撤 {:.1}% 熔断中，剩余约 {mins_left} 分钟", cfg.fuse_drawdown_pct * 100.0);
             } else {
-                let until = now_ms + self.config.fuse_days as i64 * 86_400_000;
+                let until = now_ms + cfg.fuse_days as i64 * 86_400_000;
                 self.acct.lock().unwrap().meta_set("fuse_until_ms", &until.to_string())?;
                 report.can_buy = false;
-                report.note = format!("触发熔断：回撤 {:.1}%，停止买入 {} 天", self.config.fuse_drawdown_pct * 100.0, self.config.fuse_days);
+                report.note = format!("触发熔断：回撤 {:.1}%，停止买入 {} 天", cfg.fuse_drawdown_pct * 100.0, cfg.fuse_days);
             }
+            // 熔断不只停买：降到目标仓位，避免满仓继续挨跌（“不亏太多”的缺口）
+            report.max_total_pct = report.max_total_pct.min(cfg.fuse_target_position);
         } else {
             report.can_buy = true;
+        }
+
+        // 2.5 账户收益目标：达到即降仓锁利（目标不是口号，要有动作）
+        let initial = self.acct.lock().unwrap().get_or_init_account(0.0)?.initial_capital;
+        if initial > 0.0 {
+            let ret = total_asset / initial - 1.0;
+            if ret >= cfg.profit_target_pct {
+                report.profit_reached = true;
+                report.max_total_pct = report.max_total_pct.min(cfg.profit_target_position);
+                report.note = format!(
+                    "{}已达收益目标 {:.1}%（当前 {:+.1}%），仓位上限降至 {:.0}% 锁利",
+                    if report.note.is_empty() { "" } else { "；" },
+                    cfg.profit_target_pct * 100.0, ret * 100.0,
+                    cfg.profit_target_position * 100.0
+                );
+            }
         }
 
         // 3. 持仓风控（止损/止盈/超期）
@@ -239,6 +284,7 @@ impl RiskManager {
     ///
     /// 止损/超期用**收盘价**（避开日内插针洗盘），止盈用实时价（落袋为安）。
     fn check_position(&self, p: &Position) -> finbox_store::Result<Option<OrderIntent>> {
+        let cfg = self.config();
         let (rt, close) = {
             let m = self.market.lock().unwrap();
             let rt = m.latest_snapshot_price(&p.thscode)?;
@@ -254,15 +300,24 @@ impl RiskManager {
         let pnl_close = (close - p.avg_cost) / p.avg_cost;
         let pnl_rt = (rt - p.avg_cost) / p.avg_cost;
 
+        // 尾部硬止损（实时价）：补收盘价判定的跳空敲口——盘中崩盘不等到收盘
+        if pnl_rt <= -cfg.hard_stop_loss_pct {
+            log::warn!(
+                "[风控] {} 盘中暴跌 {:.1}%（硬止损线 -{:.0}%）→ 无条件清仓",
+                p.thscode, pnl_rt * 100.0, cfg.hard_stop_loss_pct * 100.0
+            );
+            return Ok(Some(self.sell_intent(p, p.quantity)));
+        }
+
         // 止损（收盘价判定）：盘中插针不算——否则 A 股日内振幅 5% 的常态会把仓位洗在最低点
-        if pnl_close <= -self.config.stop_loss_pct {
+        if pnl_close <= -cfg.stop_loss_pct {
             log::info!(
                 "[风控] {} 收盘价 {:.2} 跌破止损线（{:.1}%）→ 清仓",
                 p.thscode, close, pnl_close * 100.0
             );
             return Ok(Some(self.sell_intent(p, p.quantity)));
         }
-        if pnl_rt <= -self.config.stop_loss_pct {
+        if pnl_rt <= -cfg.stop_loss_pct {
             log::warn!(
                 "[风控] {} 盘中触及止损线（实时 {:.1}%），但收盘价 {:.2}（{:.1}%）未破线，不卖",
                 p.thscode, pnl_rt * 100.0, close, pnl_close * 100.0
@@ -274,10 +329,10 @@ impl RiskManager {
             if q < 300 {
                 0
             } else {
-                ((q as f64 * self.config.trim_ratio) as u32 / 100) * 100
+                ((q as f64 * cfg.trim_ratio) as u32 / 100) * 100
             }
         };
-        if pnl_rt >= self.config.take_profit_pct2 && !self.tp_done(p, 2)? {
+        if pnl_rt >= cfg.take_profit_pct2 && !self.tp_done(p, 2)? {
             let q = trim_qty(p.quantity);
             if q < 100 {
                 return Ok(Some(self.sell_intent(p, p.quantity)));
@@ -285,7 +340,7 @@ impl RiskManager {
             self.mark_tp(p, 2)?;
             return Ok(Some(self.sell_intent(p, q)));
         }
-        if pnl_rt >= self.config.take_profit_pct && !self.tp_done(p, 1)? {
+        if pnl_rt >= cfg.take_profit_pct && !self.tp_done(p, 1)? {
             let q = trim_qty(p.quantity);
             if q < 100 {
                 return Ok(Some(self.sell_intent(p, p.quantity)));
@@ -299,7 +354,7 @@ impl RiskManager {
             let bought_ms = self.acct.lock().unwrap().position_bought_at(&p.thscode)?;
             if let Some(bought_ms) = bought_ms {
                 let days = (Utc::now().timestamp_millis() - bought_ms) / 86_400_000;
-                if days >= self.config.max_holding_days as i64 {
+                if days >= cfg.max_holding_days as i64 {
                     log::info!("[风控] {} 持仓 {} 天未起色 → 清仓", p.thscode, days);
                     return Ok(Some(self.sell_intent(p, p.quantity)));
                 }
