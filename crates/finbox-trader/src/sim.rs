@@ -6,7 +6,7 @@
 //! - 涨跌停：主板 10% / 创业科创 20% / 北交所 30%，涨停禁买、跌停禁卖
 //! - 费用：佣金万 2.5（最低 5 元，双边）+ 印花税 0.05%（卖出）+ 过户费 0.001%（双边）
 //! - 滑点：默认 0.05%（买入抬价/卖出压价），模拟真实冲击成本
-//! - 硬护栏：单票 ≤25% 总资产，持股 ≤4 只，同板块 ≤2 只，当日卖出后不再买入
+//! - 硬护栏：单票 ≤25% 总资产，持股 ≤4 只，同行业 ≤2 只，卖出后 60 分钟内不买
 //!
 //! 成交价 = 最新行情快照价（盘中）加减滑点，无快照回退昨收价。钱是假的，价格是真的。
 //!
@@ -26,6 +26,8 @@ use crate::{Broker, BrokerError};
 
 /// 同一（一级）行业最大持仓数（伪分散修正：同行业 4 只 ≈ 1 只）
 const MAX_PER_INDUSTRY: usize = 2;
+/// 卖出冷却窗口（分钟）：掐掉秒级冲动换股，但不剥夺全天建仓权
+const SELL_COOLDOWN_MINUTES: i64 = 60;
 
 /// 模拟盘券商。持有行情库（只读）与账户库（读写）。
 pub struct SimBroker {
@@ -143,9 +145,10 @@ fn buy(
     initial_capital: f64,
 ) -> Result<Execution, RejectReason> {
     check_trading_time()?;
-    // 换股冷却：当日已卖出则当日不再买入（破“卖了必买”的换股惯性）
-    let (day_start, _) = today_range_ms();
-    if let Some(code) = acct.sold_since(day_start).map_err(|e| RejectReason::Other(e.to_string()))? {
+    // 换股冷却：卖出后 60 分钟内不买（掐掉秒级冲动换股，但不剥夺全天建仓权；
+    // A 股资金 T+0 当日可再买，这是自愿纪律而非规则限制）
+    let cutoff = chrono::Utc::now().timestamp_millis() - SELL_COOLDOWN_MINUTES * 60_000;
+    if let Some(code) = acct.sold_since(cutoff).map_err(|e| RejectReason::Other(e.to_string()))? {
         return Err(RejectReason::SellCooldown(code));
     }
     if !is_valid_buy_quantity(&intent.thscode, intent.quantity) {

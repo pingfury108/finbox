@@ -55,7 +55,7 @@ pub enum RejectReason {
     MaxPositions(usize),
     #[error("{0} 板块持仓已达上限 {1} 只（伪分散控制）")]
     BoardConcentration(String, usize),
-    #[error("换股冷却: 今日已卖出 {0}，当日不再买入（防卖了必买的换股惯性）")]
+    #[error("换股冷却: 最近 60 分钟内已卖出 {0}，暂不买入（防卖了立刻买的换股惯性）")]
     SellCooldown(String),
     #[error("无有效行情: {0}")]
     NoPrice(String),
