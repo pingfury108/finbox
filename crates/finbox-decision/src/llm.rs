@@ -52,8 +52,8 @@ pub struct ParsedOutput {
     pub comment: String,
 }
 
-/// 调用 OpenAI 兼容 chat completion。
-pub async fn chat(config: &LlmConfig, user: &str) -> Result<String, DecisionError> {
+/// 调用 OpenAI 兼容 chat completion。`system` 为系统提示词（按账户档位选择）。
+pub async fn chat(config: &LlmConfig, user: &str, system: &str) -> Result<String, DecisionError> {
     let url = format!("{}/v1/chat/completions", config.base_url.trim_end_matches('/'));
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -64,7 +64,7 @@ pub async fn chat(config: &LlmConfig, user: &str) -> Result<String, DecisionErro
     let body = ChatRequest {
         model: &config.model,
         messages: vec![
-            Message { role: "system", content: crate::context::system_prompt() },
+            Message { role: "system", content: system },
             Message { role: "user", content: user },
         ],
         temperature: 0.2,

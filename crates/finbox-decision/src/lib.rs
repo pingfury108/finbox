@@ -83,6 +83,33 @@ impl DecisionEngine {
                 info!("板块权限过滤: {} → {} 只（初始资金 {:.0}万）", before, candidates.len(), initial / 10000.0);
             }
         }
+        // 可买性过滤：1 手成本超过“单票额度”的候选是废票（AI 决策额度不该浪费在买不起的票上）
+        // 单票额度用账户真实总资产 × 单票上限（小额档 55%/大额档 25%，与下单护栏同口径）
+        if initial > 0.0 {
+            let (total, pos_pct) = {
+                let a = self.acct.lock().unwrap();
+                let acct = a.get_or_init_account(0.0)?;
+                let total = a.total_asset_estimate(&acct).unwrap_or(acct.cash);
+                let tier_pct = if initial < 30_000.0 { 0.55 } else { 0.25 };
+                let meta_pct = a
+                    .meta_get("max_position_pct")
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.parse::<f64>().ok());
+                (total, meta_pct.unwrap_or(tier_pct))
+            };
+            let budget = total * pos_pct;
+            let before = candidates.len();
+            candidates.retain(|c| c.price * 100.0 <= budget);
+            if candidates.len() < before {
+                info!(
+                    "可买性过滤: {} → {} 只（单票额度 {:.0} 元）",
+                    before,
+                    candidates.len(),
+                    budget
+                );
+            }
+        }
         info!("初筛完成：{} 只候选", candidates.len());
         for c in &candidates {
             info!("  候选 {} {} 现价{:.2} 涨幅{:.2}% {}", c.thscode, c.name, c.price, c.pct, c.reason);
@@ -106,7 +133,7 @@ impl DecisionEngine {
         // 复制配置再释放锁，避免跨 await 持锁
         let llm_cfg = self.config.lock().unwrap().clone();
         info!("调用 LLM: {} 模型 {}", llm_cfg.base_url, llm_cfg.model);
-        let raw = match llm::chat(&llm_cfg, &ctx).await {
+        let raw = match llm::chat(&llm_cfg, &ctx, context::system_prompt_for(initial)).await {
             Ok(r) => r,
             Err(e) => {
                 let note = format!("LLM 调用失败: {e}");

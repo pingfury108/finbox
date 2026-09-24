@@ -236,6 +236,7 @@ async fn account_settings_page(State(st): State<WebState>, axum::extract::Path(n
   <label>单票仓位上限(小数) <input name=max_position_pct value="{mpp}" type=number step=0.05 min=0.05 max=1></label>
   <label>最大持仓只数 <input name=max_positions value="{mp}" type=number min=1 max=10></label>
   <label>滑点比例(小数, 0.0005=0.05%) <input name=slippage_pct value="{sp}" type=number step=0.0005 min=0 max=0.01></label>
+  <label>佣金最低(元, 免5填0) <input name=commission_min value="{cm}" type=number step=1 min=0 max=100></label>
   <button type=submit>保存</button>
 </form></section>"#,
         name = esc(&name), capital = esc(&capital), wl = esc(&get("watchlist", "")),
@@ -248,7 +249,7 @@ async fn account_settings_page(State(st): State<WebState>, axum::extract::Path(n
         ptp = esc(&get("profit_target_pct", "0.05")),
         ptpos = esc(&get("profit_target_position", "0.40")),
         mpp = esc(&get("max_position_pct", "0.25")), mp = esc(&get("max_positions", "4")),
-        sp = esc(&get("slippage_pct", "0.0005")));
+        sp = esc(&get("slippage_pct", "0.0005")), cm = esc(&get("commission_min", "5")));
     layout(&format!("{name} · 参数"), "account", &body)
 }
 
@@ -272,6 +273,7 @@ struct AccountSettingsForm {
     max_position_pct: f64,
     max_positions: usize,
     slippage_pct: f64,
+    commission_min: f64,
 }
 
 /// 保存账户参数（写账户库 meta，热生效）。
@@ -303,6 +305,7 @@ async fn account_settings_save(
         ("profit_target_position", form.profit_target_position),
         ("max_position_pct", form.max_position_pct),
         ("slippage_pct", form.slippage_pct),
+        ("commission_min", form.commission_min),
     ] {
         db.meta_set(k, &v.to_string()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }

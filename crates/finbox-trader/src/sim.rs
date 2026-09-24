@@ -33,19 +33,44 @@ const SELL_COOLDOWN_MINUTES: i64 = 60;
 pub struct SimBroker {
     market: SharedDb,
     acct: finbox_store::SharedAccountDb,
-    initial_capital: f64,
+    /// 账户级交易参数（滑点/仓位护栏/费率），可按档位覆盖
+    params: SimParams,
+}
+
+/// 账户级交易参数。
+#[derive(Debug, Clone)]
+pub struct SimParams {
+    pub initial_capital: f64,
     /// 滑点比例（买卖各按此比例向不利方向成交）
-    slippage_pct: f64,
+    pub slippage_pct: f64,
+    /// 单票仓位上限（比例）
+    pub max_position_pct: f64,
+    /// 最大持仓只数
+    pub max_positions: usize,
+    /// 佣金最低值（元）：真实券商可谈“免5”，小账户应设 0
+    pub commission_min: f64,
+}
+
+impl Default for SimParams {
+    fn default() -> Self {
+        Self {
+            initial_capital: 0.0,
+            slippage_pct: 0.0005,
+            max_position_pct: crate::MAX_POSITION_PCT,
+            max_positions: crate::MAX_POSITIONS,
+            commission_min: COMMISSION_MIN,
+        }
+    }
 }
 
 impl SimBroker {
     pub fn new(market: SharedDb, acct: finbox_store::SharedAccountDb, initial_capital: f64) -> Self {
-        Self { market, acct, initial_capital, slippage_pct: 0.0005 }
+        Self { market, acct, params: SimParams { initial_capital, ..Default::default() } }
     }
 
-    /// 按账户配置覆盖滑点（Web 参数页可改）。
-    pub fn with_slippage(mut self, slippage_pct: f64) -> Self {
-        self.slippage_pct = slippage_pct.max(0.0);
+    /// 按账户配置覆盖交易参数（Web 参数页/档位自动选择，热生效）。
+    pub fn with_params(mut self, p: SimParams) -> Self {
+        self.params = p;
         self
     }
 }
@@ -95,19 +120,19 @@ impl Broker for SimBroker {
         let mut acct = self.acct.lock().unwrap();
         // 滑点：买入抬价、卖出压价（不给理想成交价）
         let fill_price = match intent.side {
-            OrderSide::Buy => round_price(price * (1.0 + self.slippage_pct)),
-            OrderSide::Sell => round_price(price * (1.0 - self.slippage_pct)),
+            OrderSide::Buy => round_price(price * (1.0 + self.params.slippage_pct)),
+            OrderSide::Sell => round_price(price * (1.0 - self.params.slippage_pct)),
         };
         let exec = match intent.side {
-            OrderSide::Buy => buy(&mut acct, &intent, fill_price, prev_close, self.initial_capital),
-            OrderSide::Sell => sell(&mut acct, &intent, fill_price, prev_close, self.initial_capital),
+            OrderSide::Buy => buy(&mut acct, &self.params, &intent, fill_price, prev_close),
+            OrderSide::Sell => sell(&mut acct, &self.params, &intent, fill_price, prev_close),
         }?;
         Ok(exec)
     }
 
     async fn account(&self) -> Result<Account, BrokerError> {
         let db = self.acct.lock().unwrap();
-        Ok(db.get_or_init_account(self.initial_capital)?)
+        Ok(db.get_or_init_account(self.params.initial_capital)?)
     }
 
     async fn positions(&self) -> Result<Vec<Position>, BrokerError> {
@@ -131,19 +156,20 @@ fn market_price(market: &finbox_store::Db, thscode: &str) -> Result<f64, RejectR
     Ok(price)
 }
 
-fn fees(amount: f64, side: OrderSide) -> f64 {
-    let commission = (amount * COMMISSION_RATE).max(COMMISSION_MIN);
+fn fees(amount: f64, side: OrderSide, commission_min: f64) -> f64 {
+    let commission = (amount * COMMISSION_RATE).max(commission_min);
     let stamp = if side == OrderSide::Sell { amount * STAMP_RATE } else { 0.0 };
     round_price(commission + stamp + amount * TRANSFER_RATE)
 }
 
 fn buy(
     acct: &mut finbox_store::AccountDb,
+    params: &SimParams,
     intent: &OrderIntent,
     price: f64,
     prev_close: Option<f64>,
-    initial_capital: f64,
 ) -> Result<Execution, RejectReason> {
+    let initial_capital = params.initial_capital;
     check_trading_time()?;
     // 换股冷却：卖出后 60 分钟内不买（掐掉秒级冲动换股，但不剥夺全天建仓权；
     // A 股资金 T+0 当日可再买，这是自愿纪律而非规则限制）
@@ -166,7 +192,7 @@ fn buy(
     }
 
     let amount = round_price(price * intent.quantity as f64);
-    let fee = fees(amount, OrderSide::Buy);
+    let fee = fees(amount, OrderSide::Buy, params.commission_min);
     let account = acct
         .get_or_init_account(initial_capital)
         .map_err(|e| RejectReason::Other(e.to_string()))?;
@@ -182,13 +208,13 @@ fn buy(
         .position(&intent.thscode)
         .map_err(|e| RejectReason::Other(e.to_string()))?;
     let post_mv = (position.as_ref().map(|p| p.quantity as f64 * price).unwrap_or(0.0)) + amount;
-    if post_mv > total * crate::MAX_POSITION_PCT {
-        return Err(RejectReason::PositionLimit(crate::MAX_POSITION_PCT * 100.0));
+    if post_mv > total * params.max_position_pct {
+        return Err(RejectReason::PositionLimit(params.max_position_pct * 100.0));
     }
     if position.is_none() {
         let held = acct.positions().map_err(|e| RejectReason::Other(e.to_string()))?;
-        if held.len() >= crate::MAX_POSITIONS {
-            return Err(RejectReason::MaxPositions(crate::MAX_POSITIONS));
+        if held.len() >= params.max_positions {
+            return Err(RejectReason::MaxPositions(params.max_positions));
         }
     }
 
@@ -241,11 +267,12 @@ fn buy(
 
 fn sell(
     acct: &mut finbox_store::AccountDb,
+    params: &SimParams,
     intent: &OrderIntent,
     price: f64,
     prev_close: Option<f64>,
-    initial_capital: f64,
 ) -> Result<Execution, RejectReason> {
+    let initial_capital = params.initial_capital;
     check_trading_time()?;
 
     let position = acct
@@ -278,7 +305,7 @@ fn sell(
     }
 
     let amount = round_price(price * intent.quantity as f64);
-    let fee = fees(amount, OrderSide::Sell);
+    let fee = fees(amount, OrderSide::Sell, params.commission_min);
     let account = acct
         .get_or_init_account(initial_capital)
         .map_err(|e| RejectReason::Other(e.to_string()))?;
@@ -421,7 +448,14 @@ mod tests {
     }
 
     fn buy_direct(acct: &mut finbox_store::AccountDb, price: f64, qty: u32) -> Result<Execution, RejectReason> {
-        buy(acct, &intent(qty), price, Some(10.0), 200000.0)
+        buy(acct, &test_params(), &intent(qty), price, Some(10.0))
+    }
+
+    fn test_params() -> SimParams {
+        SimParams { initial_capital: 200000.0, ..Default::default() }
+    }
+    fn sell_direct(acct: &mut finbox_store::AccountDb, s: &OrderIntent, price: f64) -> Result<Execution, RejectReason> {
+        sell(acct, &test_params(), s, price, Some(10.0))
     }
 
     #[test]
@@ -489,10 +523,10 @@ mod tests {
             quantity: 100,
             decision_id: None,
         };
-        assert!(matches!(sell(&mut acct, &s, 10.5, Some(10.0), 200000.0), Err(RejectReason::TPlusOne(_, 0))));
+        assert!(matches!(sell_direct(&mut acct, &s, 10.5), Err(RejectReason::TPlusOne(_, 0))));
         // 回拨到昨日
         acct.backdate_buys("600519.SH").unwrap();
-        let e = sell(&mut acct, &s, 10.5, Some(10.0), 200000.0).unwrap();
+        let e = sell_direct(&mut acct, &s, 10.5).unwrap();
         assert!((e.fee - 5.54).abs() < 1e-9, "fee={}", e.fee);
         assert!(acct.position("600519.SH").unwrap().is_none());
     }
@@ -511,13 +545,16 @@ mod tests {
             decision_id: None,
         };
         // 昨收 10 → 跌停 9；以 9 元卖 → 拒
-        assert!(matches!(sell(&mut acct, &s, 9.0, Some(10.0), 200000.0), Err(RejectReason::LimitDown(_))));
+        assert!(matches!(sell_direct(&mut acct, &s, 9.0), Err(RejectReason::LimitDown(_))));
     }
 
     #[test]
+    #[test]
     fn fees_calc() {
-        assert!((fees(10000.0, OrderSide::Buy) - 5.1).abs() < 1e-9);
-        assert!((fees(100000.0, OrderSide::Buy) - 26.0).abs() < 1e-9);
-        assert!((fees(100000.0, OrderSide::Sell) - 76.0).abs() < 1e-9);
+        assert!((fees(10000.0, OrderSide::Buy, 5.0) - 5.1).abs() < 1e-9);
+        assert!((fees(100000.0, OrderSide::Buy, 5.0) - 26.0).abs() < 1e-9);
+        assert!((fees(100000.0, OrderSide::Sell, 5.0) - 76.0).abs() < 1e-9);
+        // 免5：小额佣金不再被抬到 5 元（万2.5 = 0.25 元）
+        assert!((fees(1000.0, OrderSide::Buy, 0.0) - 0.26).abs() < 1e-9);
     }
 }

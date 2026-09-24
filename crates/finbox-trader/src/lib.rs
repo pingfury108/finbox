@@ -9,7 +9,7 @@ pub mod sim;
 
 pub use adjustment::apply_pending_adjustments;
 pub use risk::{RiskConfig, RiskManager, RiskReport};
-pub use sim::SimBroker;
+pub use sim::{SimBroker, SimParams};
 
 /// 单票仓位上限（占总资产比例）。
 const MAX_POSITION_PCT: f64 = 0.25;

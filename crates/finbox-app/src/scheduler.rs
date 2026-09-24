@@ -12,7 +12,7 @@ use chrono::{Datelike, Local, Timelike};
 use finbox_collector::Collector;
 use finbox_decision::{DecisionEngine, LlmConfig};
 use finbox_store::SharedDb;
-use finbox_trader::{Broker, RiskConfig, RiskManager, SimBroker};
+use finbox_trader::{Broker, RiskConfig, RiskManager, SimBroker, SimParams};
 use hithink_sdk::Client;
 
 use crate::accounts;
@@ -44,6 +44,8 @@ struct AcctConf {
     max_position_pct: f64,
     /// 最大持仓只数
     max_positions: usize,
+    /// 佣金最低值（元）：小资金应设 0（真实券商可谈“免5”）
+    commission_min: f64,
 }
 
 pub struct Scheduler {
@@ -315,10 +317,31 @@ fn build_account_ctx(
         },
         conf.watchlist.clone(),
     );
-    let broker = SimBroker::new(market.clone(), acct.clone(), conf.initial_capital)
-        .with_slippage(conf.slippage_pct);
+    let broker = SimBroker::new(market.clone(), acct.clone(), conf.initial_capital).with_params(SimParams {
+        initial_capital: conf.initial_capital,
+        slippage_pct: conf.slippage_pct,
+        max_position_pct: conf.max_position_pct,
+        max_positions: conf.max_positions,
+        commission_min: conf.commission_min,
+    });
     let risk = RiskManager::new(market.clone(), acct.clone(), conf.risk);
     AccountCtx { cfg: cfg.clone(), name: name.into(), market, acct, broker, decision, risk, closed_today: false }
+}
+
+/// 账户规模分档线（元）：低于此值用“小额集中档”。
+///
+/// 小资金套大资金阵型是错的：4 只×1,200 元的伪分散 + 最低佣金 5 元
+/// （单边 0.4-1%）让策略在数学上必败（实测费用占亏损的 44-78%）。
+/// 小额档：集中 1-2 只、单票 55%、低频、免 5。
+const COMPACT_TIER_CAPITAL: f64 = 30_000.0;
+
+/// 档位默认：(单票上限, 持仓数, 佣金最低, 决策间隔分钟)
+fn tier_defaults(initial_capital: f64) -> (f64, usize, f64, u64) {
+    if initial_capital < COMPACT_TIER_CAPITAL {
+        (0.55, 2, 0.0, 60)
+    } else {
+        (0.25, 4, 5.0, 30)
+    }
 }
 
 /// 读取账户配置（meta 优先，.env 兜底），每次调用都读 → 热更新。
@@ -337,8 +360,14 @@ fn read_acct_conf(cfg: &Config, acct: &finbox_store::SharedAccountDb) -> AcctCon
         .flatten()
         .unwrap_or_default();
     let count = get("candidate_count", cfg.candidate_count as f64) as usize;
+    // 账户真实初始资金（account 行，非 meta）用于选档；meta 仅作参数覆盖
+    let conf_initial = db
+        .get_or_init_account(0.0)
+        .map(|a| a.initial_capital)
+        .unwrap_or_else(|_| get("initial_capital", cfg.initial_capital));
     // 风控参数：账户库 meta 优先（Web 参数页可改，热生效），否则用默认值
     let d = RiskConfig::default();
+    let (def_pos_pct, def_max_pos, def_comm_min, _def_interval) = tier_defaults(conf_initial);
     let risk = RiskConfig {
         stop_loss_pct: get("stop_loss_pct", d.stop_loss_pct),
         hard_stop_loss_pct: get("hard_stop_loss_pct", d.hard_stop_loss_pct),
@@ -353,13 +382,14 @@ fn read_acct_conf(cfg: &Config, acct: &finbox_store::SharedAccountDb) -> AcctCon
         profit_target_position: get("profit_target_position", d.profit_target_position),
     };
     AcctConf {
-        initial_capital: get("initial_capital", cfg.initial_capital),
+        initial_capital: conf_initial,
         watchlist: watch.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
         candidate_count: count.max(1),
         risk,
         slippage_pct: get("slippage_pct", 0.0005),
-        max_position_pct: get("max_position_pct", 0.25),
-        max_positions: get("max_positions", 4.0) as usize,
+        max_position_pct: get("max_position_pct", def_pos_pct),
+        max_positions: get("max_positions", def_max_pos as f64) as usize,
+        commission_min: get("commission_min", def_comm_min),
     }
 }
 
