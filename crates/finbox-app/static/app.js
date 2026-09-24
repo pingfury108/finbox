@@ -148,6 +148,7 @@
     // 总览卡片（所有账户合计）
     const ovCards = document.getElementById('overview-cards');
     if (ovCards) {
+      const trading = accts.length ? accts[0].trading_day : true;
       const totalSum = accts.reduce((s, a) => s + a.total, 0);
       const todaySum = accts.reduce((s, a) => s + a.today_pnl, 0);
       const initSum = accts.reduce((s, a) => s + (a.initial_capital || 0), 0);
@@ -155,7 +156,7 @@
       const pnlPct = initSum > 0 ? (totalSum / initSum - 1) * 100 : 0;
       ovCards.innerHTML =
         ovCard('总资产', '¥' + money(totalSum), '') +
-        ovCard('今日盈亏', sign(todaySum) + money(todaySum), cls(todaySum)) +
+        ovCard('今日盈亏', trading ? sign(todaySum) + money(todaySum) : '<span class="rest">休市</span>', trading ? cls(todaySum) : '') +
         ovCard('累计盈亏 <span class="label-pct">' + pct(pnlPct) + '</span>', sign(pnlSum) + money(pnlSum), cls(pnlSum));
     }
 
@@ -281,7 +282,7 @@
       const pnl = acct.total - (acct.initial_capital || acct.total);
       cards.innerHTML = [
         card('总资产', '¥' + money(acct.total)),
-        card('今日盈亏', sign(acct.today_pnl) + money(acct.today_pnl), cls(acct.today_pnl)),
+        card('今日盈亏', acct.trading_day ? sign(acct.today_pnl) + money(acct.today_pnl) : '<span class="rest">休市</span>', acct.trading_day ? cls(acct.today_pnl) : ''),
         card('累计盈亏 <span class="label-pct">' + pct(acct.return_pct) + '</span>', sign(pnl) + money(pnl), cls(pnl)),
         card('可用现金', '¥' + money(acct.cash)),
         card('持仓市值', '¥' + money(acct.market_value)),

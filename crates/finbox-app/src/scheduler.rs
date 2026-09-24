@@ -464,11 +464,24 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
             let min = now.timestamp() / 60;
 
             if weekday_iso < 6 {
+                // 交易日判断（工作日 ≠ 交易日：节假日休市）。格式必须与 trading_days 表一致（%Y%m%d）
+                let today = now.format("%Y%m%d").to_string();
+                let trading_day = self
+                    .market
+                    .lock()
+                    .unwrap()
+                    .is_trading_day(&today)
+                    .unwrap_or(true);
+                if !trading_day {
+                    // 休市：不跑风控/决策/快照，避免无谓的 AI 调用与口径混乱
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    continue;
+                }
                 // 每日首次进入工作日循环时应用除权（除权日开盘前生效）
-                let today = now.format("%Y-%m-%d").to_string();
-                if today != last_adjust_date && minute >= 9 * 60 {
+                let today_dash = now.format("%Y-%m-%d").to_string();
+                if today_dash != last_adjust_date && minute >= 9 * 60 {
                     self.apply_adjustments();
-                    last_adjust_date = today;
+                    last_adjust_date = today_dash;
                 }
                 // 盘中（9:30-15:00）
                 if minute >= 9 * 60 + 30 && minute < 15 * 60 {
@@ -738,16 +751,30 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
     async fn snapshot_account(&self) -> anyhow::Result<()> {
         // read_acct_conf 内部自行 lock，必须在持锁前调用（防自锁）
         let conf = read_acct_conf(&self.cfg, &self.acct);
-        let acct = self.acct.lock().unwrap();
-        let account = acct.get_or_init_account(conf.initial_capital)?;
-        let total = acct.total_asset_estimate(&account)?;
-        drop(acct);
+        // 市值口径（实时价）：与页面/风控的 total 同口径。
+        // 教训：原来用 total_asset_estimate（成本口径），导致今日盈亏
+        // = 真实今日盈亏 + 历史浮盈，休市日显示“今日盈亏=全部浮盈”。
+        let (cash, mv) = {
+            let acct = self.acct.lock().unwrap();
+            let account = acct.get_or_init_account(conf.initial_capital)?;
+            let positions = acct.positions()?;
+            let mut mv = 0.0;
+            {
+                let m = self.market.lock().unwrap();
+                for p in &positions {
+                    let price = m.latest_snapshot_price(&p.thscode)?.unwrap_or(p.avg_cost);
+                    mv += price * p.quantity as f64;
+                }
+            }
+            (account.cash, mv)
+        };
+        let total = cash + mv;
         let ts = chrono::Utc::now().timestamp_millis();
         self.acct
             .lock()
             .unwrap()
-            .insert_account_snapshot(ts, account.cash, total - account.cash, total)?;
-        log::info!("[{}][收盘快照] 现金 {:.2} 市值 {:.2} 总资产 {:.2}", self.name, account.cash, total - account.cash, total);
+            .insert_account_snapshot(ts, cash, mv, total)?;
+        log::info!("[{}][收盘快照] 现金 {:.2} 市值 {:.2} 总资产 {:.2}", self.name, cash, mv, total);
         Ok(())
     }
 }

@@ -53,6 +53,8 @@ pub struct AccountAsset {
     pub sparkline: Vec<f64>,
     /// 初始资金（累计盈亏计算用）
     pub initial_capital: f64,
+    /// 今天是否交易日（休市日“今日盈亏”显示为休市）
+    pub trading_day: bool,
 }
 
 /// 指数实时行情（状态条用）。
@@ -198,7 +200,16 @@ pub async fn accounts(State(st): State<WebState>) -> Json<Vec<AccountAsset>> {
             };
             let total = cash + mv;
             let rp = if initial > 0.0 { (total / initial - 1.0) * 100.0 } else { 0.0 };
-            let today_pnl = prev_close_snap.map(|prev| total - prev).unwrap_or(0.0);
+            // 交易日判断：休市日“今日盈亏”无意义（价格不变），前端显示“休市”
+            let trading_day = {
+                let today8 = chrono::Local::now().format("%Y%m%d").to_string();
+                st.market.lock().unwrap().is_trading_day(&today8).unwrap_or(true)
+            };
+            let today_pnl = if trading_day {
+                prev_close_snap.map(|prev| total - prev).unwrap_or(0.0)
+            } else {
+                0.0
+            };
             // sparkline：历史收盘快照 + 当前实时值（盘中能看到今日走势）
             let mut spark: Vec<f64> = sparkline.iter().rev().take(19).rev().cloned().collect();
             // 最后快照是今天（已收盘）时替换为实时值，避免同日两点
@@ -224,6 +235,7 @@ pub async fn accounts(State(st): State<WebState>) -> Json<Vec<AccountAsset>> {
                 today_pnl,
                 sparkline: spark,
                 initial_capital: initial,
+                trading_day,
             });
         }
     }
