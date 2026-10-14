@@ -159,7 +159,22 @@ impl RiskManager {
             if fuse_until_ms > now_ms {
                 report.can_buy = false;
                 let mins_left = (fuse_until_ms - now_ms) / 60000;
-                report.note = format!("账户回撤 {:.1}% 熔断中，剩余约 {mins_left} 分钟", cfg.fuse_drawdown_pct * 100.0);
+                let days_left = mins_left / 1440;
+                let hours_left = (mins_left % 1440) / 60;
+                report.note = format!(
+                    "账户回撤 {:.1}% 熔断中，剩余 {} 天 {} 小时",
+                    cfg.fuse_drawdown_pct * 100.0, days_left, hours_left
+                );
+            } else if fuse_until_ms > 0 {
+                // 熔断期满但回撤仍超限：空仓账户的现金永不变化 → 不重置将永久熔断（无期徒刑）
+                // 语义：熔断是“冷静期”不是“封号”——到期后接受当前水位作为新基准，重新出发
+                self.acct.lock().unwrap().meta_set("fuse_until_ms", "0")?;
+                self.update_peak(total_asset);
+                report.can_buy = true;
+                report.note = format!(
+                    "熔断期满，回撤仍超 {:.0}%——重置峰值基准（承认亏损 {:.1}%），重新出发",
+                    cfg.fuse_drawdown_pct * 100.0, drawdown * 100.0
+                );
             } else {
                 let until = now_ms + cfg.fuse_days as i64 * 86_400_000;
                 self.acct.lock().unwrap().meta_set("fuse_until_ms", &until.to_string())?;
@@ -256,7 +271,6 @@ impl RiskManager {
         let done: HashSet<&str> = existing.iter().map(|i| i.thscode.as_str()).collect();
         // (代码, 名称, 数量, 市值, 盈亏比例)
         let mut rows: Vec<(String, String, u32, f64, f64)> = Vec::new();
-        let mut mv_total = 0.0;
         for p in positions {
             if done.contains(p.thscode.as_str()) {
                 continue;
@@ -273,7 +287,6 @@ impl RiskManager {
                 .latest_snapshot_price(&p.thscode)?
                 .unwrap_or(p.avg_cost);
             let mv = price * p.quantity as f64;
-            mv_total += mv;
             let pnl = if p.avg_cost > 0.0 { price / p.avg_cost - 1.0 } else { 0.0 };
             rows.push((p.thscode.clone(), p.name.clone(), p.quantity, mv, pnl));
         }
@@ -598,6 +611,26 @@ mod tests {
         assert_eq!(report.forced_sells[0].quantity, 300, "减 1/3");
         let report2 = rm.evaluate().unwrap();
         assert!(report2.forced_sells.is_empty(), "同一档不应重复减仓");
+    }
+
+    #[test]
+    fn fuse_expired_resets_peak_instead_of_permanent_lock() {
+        // 熔断期满 + 空仓 + 回撤仍超线：必须重置峰值重新出发，而不是永久熔断
+        let (market, acct, rm) = setup();
+        put_position(&acct, 9400.0, 0, 0.0); // 空仓现金 9400，初始 10000（回撤 6%）
+        {
+            let a = acct.lock().unwrap();
+            a.meta_set("peak_asset", "10000").unwrap();
+            // 熔断已于 1 小时前到期
+            let past = (chrono::Utc::now().timestamp_millis() - 3600_000).to_string();
+            a.meta_set("fuse_until_ms", &past).unwrap();
+        }
+        let report = rm.evaluate().unwrap();
+        assert!(report.can_buy, "熔断期满后必须恢复买入（空仓账户）");
+        assert!(report.note.contains("重新出发"), "note={}", report.note);
+        // 峰值应重置为当前总资产（下一轮 drawdown = 0）
+        let peak = acct.lock().unwrap().meta_get("peak_asset").unwrap().unwrap();
+        assert_eq!(peak.parse::<f64>().unwrap() as i64, 9400);
     }
 
     #[test]

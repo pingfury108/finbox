@@ -44,10 +44,6 @@ pub fn system_prompt_for(initial_capital: f64) -> &'static str {
     }
 }
 
-pub fn system_prompt() -> &'static str {
-    SYSTEM_PROMPT
-}
-
 /// 趋势摘要：近 60 根日 K 的涨跌幅、均线、区间高低点。
 fn trend_summary(db: &Db, thscode: &str) -> String {
     let bars = match db.recent_bars(thscode, 60) {
