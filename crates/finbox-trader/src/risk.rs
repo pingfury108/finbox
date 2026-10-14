@@ -31,12 +31,8 @@ pub struct RiskConfig {
     pub trim_ratio: f64,
     /// 持仓超期天数（超过且无起色则清仓）
     pub max_holding_days: u32,
-    /// 账户熔断回撤阈值
-    pub fuse_drawdown_pct: f64,
-    /// 熔断持续天数
-    pub fuse_days: u32,
-    /// 熔断时降到目标仓位（不只停买，避免满仓挨跌）
-    pub fuse_target_position: f64,
+    /// 深度熔断：回撤超此线 → 清仓 + 停买 + 等人工介入（策略可能失灵，不自动恢复）
+    pub hard_stop_drawdown_pct: f64,
     /// 账户收益目标（达到后降仓锁利）
     pub profit_target_pct: f64,
     /// 达标后的仓位上限
@@ -52,12 +48,30 @@ impl Default for RiskConfig {
             take_profit_pct2: 0.10,
             trim_ratio: 1.0 / 3.0,
             max_holding_days: 20,
-            fuse_drawdown_pct: 0.05,
-            fuse_days: 5,
-            fuse_target_position: 0.30,
+            hard_stop_drawdown_pct: 0.08,
             profit_target_pct: 0.05,
             profit_target_position: 0.40,
         }
+    }
+}
+
+/// 回撤 → 仓位系数（分级防御，替代时间熔断）。
+///
+/// 设计哲学：时间熔断（停买 N 天）是为人性设计的——防情绪化交易。
+/// AI 没有情绪，固定天数只会“底部锁仓、反弹起点解锁”错过修复。
+/// 改为仓位系数随回撤深度递减：状态驱动、自动愈合、永不锁死。
+/// 且最大回撤天然有界：回撤越深敞口越小，下行速度被强制放缓。
+fn tier_factor(drawdown: f64) -> f64 {
+    if drawdown < 0.02 {
+        1.0
+    } else if drawdown < 0.035 {
+        0.70
+    } else if drawdown < 0.05 {
+        0.45
+    } else if drawdown < 0.065 {
+        0.25
+    } else {
+        0.15
     }
 }
 
@@ -74,6 +88,8 @@ pub struct RiskReport {
     pub regime: String,
     /// 是否已达到账户收益目标（降仓锁利中）
     pub profit_reached: bool,
+    /// 当前回撤（百分比）
+    pub drawdown_pct: f64,
     /// 备注（熔断状态等）
     pub note: String,
 }
@@ -139,50 +155,43 @@ impl RiskManager {
         report.regime = regime.into();
         report.max_total_pct = max_total;
 
-        // 2. 账户峰值与熔断（读 acct；总资产 = 现金 + 持仓市值[读 market 价格]）
+        // 2. 账户峰值与回撤分级仓位（读 acct；总资产 = 现金 + 持仓市值[读 market 价格]）
         let total_asset = self.total_asset()?;
-        let (peak, fuse_until_ms) = {
+        let peak = {
             let db = self.acct.lock().unwrap();
-            let peak = self.current_peak_from(&db);
-            let fuse = db.meta_get("fuse_until_ms")?.and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
-            (peak, fuse)
+            self.current_peak_from(&db)
         };
         if total_asset > peak {
             self.update_peak(total_asset);
         }
         let peak = self.current_peak();
 
-        let now_ms = Utc::now().timestamp_millis();
         let drawdown = if peak > 0.0 { (peak - total_asset) / peak } else { 0.0 };
-        // 熔断（账户级回撤）：只停买，不再直接减仓（减仓统一走下方“确认后减仓”）
-        if peak > 0.0 && drawdown >= cfg.fuse_drawdown_pct {
-            if fuse_until_ms > now_ms {
-                report.can_buy = false;
-                let mins_left = (fuse_until_ms - now_ms) / 60000;
-                let days_left = mins_left / 1440;
-                let hours_left = (mins_left % 1440) / 60;
-                report.note = format!(
-                    "账户回撤 {:.1}% 熔断中，剩余 {} 天 {} 小时",
-                    cfg.fuse_drawdown_pct * 100.0, days_left, hours_left
-                );
-            } else if fuse_until_ms > 0 {
-                // 熔断期满但回撤仍超限：空仓账户的现金永不变化 → 不重置将永久熔断（无期徒刑）
-                // 语义：熔断是“冷静期”不是“封号”——到期后接受当前水位作为新基准，重新出发
-                self.acct.lock().unwrap().meta_set("fuse_until_ms", "0")?;
-                self.update_peak(total_asset);
-                report.can_buy = true;
-                report.note = format!(
-                    "熔断期满，回撤仍超 {:.0}%——重置峰值基准（承认亏损 {:.1}%），重新出发",
-                    cfg.fuse_drawdown_pct * 100.0, drawdown * 100.0
-                );
-            } else {
-                let until = now_ms + cfg.fuse_days as i64 * 86_400_000;
-                self.acct.lock().unwrap().meta_set("fuse_until_ms", &until.to_string())?;
-                report.can_buy = false;
-                report.note = format!("触发熔断：回撤 {:.1}%，停止买入 {} 天", cfg.fuse_drawdown_pct * 100.0, cfg.fuse_days);
-            }
+        report.drawdown_pct = drawdown * 100.0;
+        let tier = tier_factor(drawdown);
+
+        // 深度熔断（≥8%）：清仓到 0% + 停买 + 等人工介入。
+        // 不是“停几天”——策略可能真的坏了，此时该看的是人，不是时间。
+        // 空仓后现金不变、回撤不恢复 → 永不自动解除，需人工重置。
+        if drawdown >= cfg.hard_stop_drawdown_pct {
+            report.can_buy = false;
+            report.max_total_pct = 0.0;
+            report.note = format!(
+                "深度熔断：回撤 {:.1}% ≥ {:.0}%，清仓停买，等人工检查",
+                drawdown * 100.0,
+                cfg.hard_stop_drawdown_pct * 100.0
+            );
         } else {
             report.can_buy = true;
+            // 回撤分级仓位：系数随深度递减，回血自动回升（自动愈合，无时间参数）
+            if tier < 1.0 {
+                report.max_total_pct *= tier;
+                report.note = format!(
+                    "回撤 {:.1}% 防御中：仓位上限 ×{:.0}%",
+                    drawdown * 100.0,
+                    tier * 100.0
+                );
+            }
         }
 
         // 2.5 账户收益目标：达到即降仓锁利（目标不是口号，要有动作）
@@ -209,11 +218,11 @@ impl RiskManager {
             }
         }
 
-        // 4. 减仓降仓：**只在 risk-off（或熔断）且连续确认后才动手**。
+        // 4. 减仓降仓：**只在需要防御（risk-off/分级降档/深度熔断/达标）且连续确认后才动手**。
         //    教训（2026-09-21）：原来“任何时点仓位>目标就减仓”，导致开盘头几分钟
         //    涨跌家数抖动（risk-on→neutral→risk-on）被当成真实信号，
         //    买入 60 秒后就被市价砍仓。neutral 恢复为“只限制买入，不动手”。
-        let need_trim = report.regime == "risk-off" || !report.can_buy || report.profit_reached;
+        let need_trim = report.regime == "risk-off" || !report.can_buy || report.profit_reached || tier < 1.0;
         let streak = if need_trim {
             self.trim_streak.fetch_add(1, AtomicOrdering::Relaxed) + 1
         } else {
@@ -221,9 +230,6 @@ impl RiskManager {
             0
         };
         if need_trim {
-            if report.regime == "risk-off" {
-                report.max_total_pct = report.max_total_pct.min(cfg.fuse_target_position);
-            }
             if streak < TRIM_CONFIRM_EVALS {
                 report.note = format!(
                     "{}{}待确认减仓（{streak}/{TRIM_CONFIRM_EVALS}），本轮不动手",
@@ -614,23 +620,26 @@ mod tests {
     }
 
     #[test]
-    fn fuse_expired_resets_peak_instead_of_permanent_lock() {
-        // 熔断期满 + 空仓 + 回撤仍超线：必须重置峰值重新出发，而不是永久熔断
-        let (market, acct, rm) = setup();
-        put_position(&acct, 9400.0, 0, 0.0); // 空仓现金 9400，初始 10000（回撤 6%）
-        {
-            let a = acct.lock().unwrap();
-            a.meta_set("peak_asset", "10000").unwrap();
-            // 熔断已于 1 小时前到期
-            let past = (chrono::Utc::now().timestamp_millis() - 3600_000).to_string();
-            a.meta_set("fuse_until_ms", &past).unwrap();
-        }
-        let report = rm.evaluate().unwrap();
-        assert!(report.can_buy, "熔断期满后必须恢复买入（空仓账户）");
-        assert!(report.note.contains("重新出发"), "note={}", report.note);
-        // 峰值应重置为当前总资产（下一轮 drawdown = 0）
-        let peak = acct.lock().unwrap().meta_get("peak_asset").unwrap().unwrap();
-        assert_eq!(peak.parse::<f64>().unwrap() as i64, 9400);
+    fn drawdown_tiers_scale_position_cap() {
+        // 回撤 3% → 仓位上限 × 70%；回撤 6% → × 25%；≥8% → 深度熔断（0% + 停买）
+        // 空仓现金账户（无价格波动）使 drawdown 精确可控
+        let run = |peak: f64, cash: f64| -> RiskReport {
+            let (market, acct, rm) = setup();
+            put_position(&acct, cash, 0, 0.0);
+            acct.lock().unwrap().meta_set("peak_asset", &peak.to_string()).unwrap();
+            rm.evaluate().unwrap()
+        };
+        // 无快照 → breadth 默认 50% → neutral（55%）
+        let r = run(100_000.0, 97_000.0); // 回撤 3%
+        assert!((r.max_total_pct - 0.55 * 0.70).abs() < 1e-9, "3% 回撤应降档到 70%");
+        assert!(r.can_buy);
+        let r = run(100_000.0, 94_000.0); // 回撤 6%
+        assert!((r.max_total_pct - 0.55 * 0.25).abs() < 1e-9, "6% 回撤应降档到 25%");
+        assert!(r.can_buy);
+        let r = run(100_000.0, 90_000.0); // 回撤 10% ≥ 8% → 深度熔断
+        assert!(!r.can_buy, "深度熔断应停买");
+        assert_eq!(r.max_total_pct, 0.0, "深度熔断应清仓");
+        assert!(r.note.contains("深度熔断"));
     }
 
     #[test]

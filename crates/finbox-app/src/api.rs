@@ -434,15 +434,15 @@ pub async fn risk_status(
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let acct = accounts::open_account(&st.cfg.data_dir, &name).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
-    let (positions, cash, fuse_until, peak, sl, tp) = {
+    let (positions, cash, peak, sl, tp, hard_stop) = {
         let db = acct.lock().unwrap();
         let ac = db.get_or_init_account(st.cfg.initial_capital).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
-        let fuse = db.meta_get("fuse_until_ms").ok().flatten().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
         let peak = db.meta_get("peak_asset").ok().flatten().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
         let num = |k: &str, d: f64| db.meta_get(k).ok().flatten().and_then(|s| s.parse::<f64>().ok()).unwrap_or(d);
         let sl = num("stop_loss_pct", 0.05);
         let tp = num("take_profit_pct", 0.06);
-        (db.positions().unwrap_or_default(), ac.cash, fuse, peak, sl, tp)
+        let hsd = num("hard_stop_drawdown_pct", 0.08);
+        (db.positions().unwrap_or_default(), ac.cash, peak, sl, tp, hsd)
     };
     let mut rows = Vec::new();
     let mut mv = 0.0;
@@ -457,13 +457,15 @@ pub async fn risk_status(
         }
     }
     let total = cash + mv;
-    let now_ms = chrono::Utc::now().timestamp_millis();
     let drawdown = if peak > 0.0 { (peak - total) / peak * 100.0 } else { 0.0 };
+    // 防御档位（与风控层 tier_factor 同口径）：回撤分级仓位
+    let tier = if drawdown < 2.0 { 100 } else if drawdown < 3.5 { 70 } else if drawdown < 5.0 { 45 } else if drawdown < 6.5 { 25 } else { 15 };
+    let hard_stop = drawdown >= hard_stop * 100.0;
     Ok(Json(serde_json::json!({
-        "fuse_active": fuse_until > now_ms,
+        "fuse_active": hard_stop,
+        "defense_tier": tier,
         "stop_loss_pct": sl * 100.0,
         "take_profit_pct": tp * 100.0,
-        "fuse_until_ms": fuse_until,
         "peak": peak,
         "total": total,
         "drawdown_pct": drawdown,

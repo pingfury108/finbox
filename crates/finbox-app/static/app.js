@@ -378,7 +378,9 @@
     try { r = await get('/api/account/' + encodeURIComponent(name) + '/risk'); } catch (e) { return; }
     let html = '<div class="risk-row">';
     if (r.fuse_active) {
-      html += '<span class="regime risk-off">熔断中（回撤超限，暂停买入）</span>';
+      html += '<span class="regime risk-off">深度熔断（清仓停买，等人工检查）</span>';
+    } else if (r.defense_tier < 100) {
+      html += '<span class="regime risk-off">防御中（仓位上限 ×' + r.defense_tier + '%）</span>';
     } else {
       html += '<span class="regime neutral">风控正常</span>';
     }

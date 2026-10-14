@@ -375,9 +375,7 @@ fn read_acct_conf(cfg: &Config, acct: &finbox_store::SharedAccountDb) -> AcctCon
         take_profit_pct2: get("take_profit_pct2", d.take_profit_pct2),
         trim_ratio: get("trim_ratio", d.trim_ratio),
         max_holding_days: get("max_holding_days", d.max_holding_days as f64) as u32,
-        fuse_drawdown_pct: get("fuse_drawdown_pct", d.fuse_drawdown_pct),
-        fuse_days: get("fuse_days", d.fuse_days as f64) as u32,
-        fuse_target_position: get("fuse_target_position", d.fuse_target_position),
+        hard_stop_drawdown_pct: get("hard_stop_drawdown_pct", d.hard_stop_drawdown_pct),
         profit_target_pct: get("profit_target_pct", d.profit_target_pct),
         profit_target_position: get("profit_target_position", d.profit_target_position),
     };

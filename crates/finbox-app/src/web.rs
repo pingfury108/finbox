@@ -227,9 +227,7 @@ async fn account_settings_page(State(st): State<WebState>, axum::extract::Path(n
   <label>止盈二档(小数, 再减 {trim}%) <input name=take_profit_pct2 value="{tp2}" type=number step=0.005 min=0></label>
   <label>止盈减仓比例(0.33=1/3) <input name=trim_ratio value="{trim}" type=number step=0.05 min=0 max=1></label>
   <label>持仓超期天数 <input name=max_holding_days value="{mhd}" type=number min=1></label>
-  <label>熔断回撤线(小数) <input name=fuse_drawdown_pct value="{fdp}" type=number step=0.005 min=0></label>
-  <label>熔断持续天数 <input name=fuse_days value="{fd}" type=number min=0></label>
-  <label>熔断目标仓位(小数) <input name=fuse_target_position value="{ftp}" type=number step=0.05 min=0 max=1></label>
+  <label>深度熔断线(小数, 超此线清仓停买等人工) <input name=hard_stop_drawdown_pct value="{hsd}" type=number step=0.005 min=0></label>
   <label>收益目标(小数, 0.05=+5%) <input name=profit_target_pct value="{ptp}" type=number step=0.005 min=0></label>
   <label>达标后仓位上限(小数) <input name=profit_target_position value="{ptpos}" type=number step=0.05 min=0 max=1></label>
   <h3 style="margin:16px 0 4px">仓位与执行</h3>
@@ -244,8 +242,7 @@ async fn account_settings_page(State(st): State<WebState>, axum::extract::Path(n
         sl = esc(&get("stop_loss_pct", "0.05")), hsl = esc(&get("hard_stop_loss_pct", "0.08")),
         tp1 = esc(&get("take_profit_pct", "0.06")), tp2 = esc(&get("take_profit_pct2", "0.10")),
         trim = esc(&get("trim_ratio", "0.33")), mhd = esc(&get("max_holding_days", "20")),
-        fdp = esc(&get("fuse_drawdown_pct", "0.05")), fd = esc(&get("fuse_days", "5")),
-        ftp = esc(&get("fuse_target_position", "0.30")),
+        hsd = esc(&get("hard_stop_drawdown_pct", "0.08")),
         ptp = esc(&get("profit_target_pct", "0.05")),
         ptpos = esc(&get("profit_target_position", "0.40")),
         mpp = esc(&get("max_position_pct", "0.25")), mp = esc(&get("max_positions", "4")),
@@ -265,9 +262,7 @@ struct AccountSettingsForm {
     take_profit_pct2: f64,
     trim_ratio: f64,
     max_holding_days: u32,
-    fuse_drawdown_pct: f64,
-    fuse_days: u32,
-    fuse_target_position: f64,
+    hard_stop_drawdown_pct: f64,
     profit_target_pct: f64,
     profit_target_position: f64,
     max_position_pct: f64,
@@ -299,8 +294,7 @@ async fn account_settings_save(
         ("take_profit_pct", form.take_profit_pct),
         ("take_profit_pct2", form.take_profit_pct2),
         ("trim_ratio", form.trim_ratio),
-        ("fuse_drawdown_pct", form.fuse_drawdown_pct),
-        ("fuse_target_position", form.fuse_target_position),
+        ("hard_stop_drawdown_pct", form.hard_stop_drawdown_pct),
         ("profit_target_pct", form.profit_target_pct),
         ("profit_target_position", form.profit_target_position),
         ("max_position_pct", form.max_position_pct),
@@ -311,7 +305,6 @@ async fn account_settings_save(
     }
     for (k, v) in [
         ("max_holding_days", form.max_holding_days),
-        ("fuse_days", form.fuse_days),
         ("max_positions", form.max_positions as u32),
     ] {
         db.meta_set(k, &v.to_string()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
