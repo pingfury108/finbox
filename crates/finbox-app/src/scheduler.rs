@@ -343,21 +343,21 @@ fn parse_candidate_line(context: &str, code: &str) -> Option<ParsedCand> {
         }
         if let Some(t) = line.find("强势型(") {
             out.ctype = Some("强势型".into());
-            out.score = line[t + 10..].split(')').next().and_then(|s| s.parse::<f64>().ok());
+            out.score = line[t + "强势型(".len()..].split(')').next().and_then(|s| s.parse::<f64>().ok());
         } else if let Some(t) = line.find("回调型(") {
             out.ctype = Some("回调型".into());
-            out.score = line[t + 10..].split(')').next().and_then(|s| s.parse::<f64>().ok());
+            out.score = line[t + "回调型(".len()..].split(')').next().and_then(|s| s.parse::<f64>().ok());
         }
         if let Some(t) = line.find("涨幅 ") {
-            out.day_pct = line[t + 9..].split('%').next().and_then(|s| s.trim().parse::<f64>().ok());
+            out.day_pct = line[t + "涨幅 ".len()..].split('%').next().and_then(|s| s.trim().parse::<f64>().ok());
         }
         if let Some(t) = line.find("量比 ") {
-            let tail = &line[t + 9..];
+            let tail = &line[t + "量比 ".len()..];
             let num: String = tail.chars().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-').collect();
             out.volume_ratio = num.parse::<f64>().ok();
         }
         if let Some(t) = line.find("现价 ") {
-            out.price = line[t + 9..].split(',').next().and_then(|s| s.trim().parse::<f64>().ok());
+            out.price = line[t + "现价 ".len()..].split(',').next().and_then(|s| s.trim().parse::<f64>().ok());
         }
         return Some(out);
     }
@@ -518,6 +518,10 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
         // 历史决策特征回补（一次性：特征表为空时从 decision_logs 解析）
         if let Err(e) = self.backfill_decision_features_once().await {
             log::warn!("[{}] 历史决策特征回补失败: {e}", self.name);
+        }
+        // 历史决策的结果回填（历史决策的日K早已存在，立即补齐）
+        if let Err(e) = self.backfill_decision_outcomes().await {
+            log::warn!("[{}] 历史决策结果回填失败: {e}", self.name);
         }
         let mut last_decision_min = 0i64;
         let mut last_adjust_date = String::new();
