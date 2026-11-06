@@ -33,6 +33,8 @@ pub struct RiskConfig {
     pub max_holding_days: u32,
     /// 深度熔断：回撤超此线 → 清仓 + 停买 + 等人工介入（策略可能失灵，不自动恢复）
     pub hard_stop_drawdown_pct: f64,
+    /// risk-off 时的仓位上限（规则闭环可调）
+    pub riskoff_position: f64,
     /// 账户收益目标（达到后降仓锁利）
     pub profit_target_pct: f64,
     /// 达标后的仓位上限
@@ -49,6 +51,7 @@ impl Default for RiskConfig {
             trim_ratio: 1.0 / 3.0,
             max_holding_days: 20,
             hard_stop_drawdown_pct: 0.08,
+            riskoff_position: 0.30,
             profit_target_pct: 0.05,
             profit_target_position: 0.40,
         }
@@ -98,13 +101,13 @@ pub struct RiskReport {
 ///
 /// 调优：risk-on 60%→75%（40% 制度性闲置太重，目标 +5% 需组合涨 8.3%）；
 /// neutral 40%→55%；risk-off 0%→30%（降仓而非清仓，避免与 re-buy 反复摩擦）。
-fn regime_max_total(breadth_ratio: f64) -> (&'static str, f64) {
+fn regime_max_total(breadth_ratio: f64, riskoff_position: f64) -> (&'static str, f64) {
     if breadth_ratio >= 0.6 {
         ("risk-on", 0.75)
     } else if breadth_ratio >= 0.4 {
         ("neutral", 0.55)
     } else {
-        ("risk-off", 0.30)
+        ("risk-off", riskoff_position)
     }
 }
 
@@ -151,7 +154,7 @@ impl RiskManager {
         // 1. 市场状态（涨跌家数，读 market）
         let (up, total) = self.market.lock().unwrap().market_breadth()?;
         let ratio = if total > 0 { up as f64 / total as f64 } else { 0.5 };
-        let (regime, max_total) = regime_max_total(ratio);
+        let (regime, max_total) = regime_max_total(ratio, cfg.riskoff_position);
         report.regime = regime.into();
         report.max_total_pct = max_total;
 
@@ -566,9 +569,10 @@ mod tests {
 
     #[test]
     fn regime_thresholds() {
-        assert_eq!(regime_max_total(0.7), ("risk-on", 0.75));
-        assert_eq!(regime_max_total(0.5), ("neutral", 0.55));
-        assert_eq!(regime_max_total(0.2), ("risk-off", 0.30));
+        assert_eq!(regime_max_total(0.7, 0.30), ("risk-on", 0.75));
+        assert_eq!(regime_max_total(0.5, 0.30), ("neutral", 0.55));
+        assert_eq!(regime_max_total(0.2, 0.30), ("risk-off", 0.30));
+        assert_eq!(regime_max_total(0.2, 0.45), ("risk-off", 0.45), "规则闭环可调 risk-off 仓位");
     }
 
     fn put_position(acct: &finbox_store::SharedAccountDb, cash: f64, qty: u32, cost: f64) {

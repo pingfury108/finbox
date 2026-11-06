@@ -421,6 +421,34 @@ impl AccountDb {
         Ok(())
     }
 
+    /// 已回填 D5 的原始样本（多维参数搜索用，样本量几百条，内存处理无压力）。
+    /// 返回 (regime, candidate_type, score, volume_ratio, day_pct, ret_d5)。
+    #[allow(clippy::type_complexity)]
+    pub fn all_outcomes(&self) -> Result<Vec<(String, String, Option<f64>, Option<f64>, Option<f64>, f64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT regime, candidate_type, score, volume_ratio, day_pct, ret_d5
+             FROM decision_features
+             WHERE ret_d5 IS NOT NULL AND candidate_type IS NOT NULL",
+        ).map_err(se)?;
+        let mut rows = stmt.query([]).map_err(se)?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next().map_err(se)? {
+            let num = |i: usize| -> Option<f64> {
+                r.get::<_, Option<f64>>(i).ok().flatten()
+                    .or_else(|| r.get::<_, Option<i64>>(i).ok().flatten().map(|v| v as f64))
+            };
+            out.push((
+                r.get::<_, String>(0).map_err(se)?,
+                r.get::<_, String>(1).map_err(se)?,
+                num(2),
+                num(3),
+                num(4),
+                num(5).unwrap_or(0.0),
+            ))
+        }
+        Ok(out)
+    }
+
     /// 分桶战绩：按（市场状态 × 候选类型）聚合已回填决策的 D5 均值与胜率。
     /// 战绩注入的数据源（每周随真实成交滚动更新）。
     pub fn bucket_stats(&self) -> Result<Vec<(String, String, i64, f64, f64)>> {

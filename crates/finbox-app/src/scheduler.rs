@@ -440,6 +440,7 @@ fn read_acct_conf(cfg: &Config, acct: &finbox_store::SharedAccountDb) -> AcctCon
         trim_ratio: get("trim_ratio", d.trim_ratio),
         max_holding_days: get("max_holding_days", d.max_holding_days as f64) as u32,
         hard_stop_drawdown_pct: get("hard_stop_drawdown_pct", d.hard_stop_drawdown_pct),
+        riskoff_position: get("rule_riskoff_position", d.riskoff_position),
         profit_target_pct: get("profit_target_pct", d.profit_target_pct),
         profit_target_position: get("profit_target_position", d.profit_target_position),
     };
@@ -845,65 +846,90 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
         Ok(())
     }
 
-    /// P4 规则闭环：月度执行一次。LLM 提出回调型配额建议 → 用特征库历史回测裁决。
-    /// 裁决改善则写入 meta `rule_pullback_share`（自动生效），否则否决并记录理由。
-    /// 安全边界：LLM 只能调这一个旋钮，不能改代码逻辑。
+    /// P4 规则闭环：14 天或新增 20 样本触发（频率由数据决定，不由日历决定）。
+    /// 四个维度各独立裁决，改善 > 0.3pp 才写入 meta（自动生效）。
+    /// 安全边界：只能调这四个旋钮的离散候选值，不能改代码逻辑。
     async fn rule_cycle_if_due(&self) -> anyhow::Result<()> {
-        use chrono::Datelike;
-        let today = chrono::Local::now();
-        // 每月 1-3 日且本月未执行
-        if today.day() > 3 {
+        // 进程级只允许一个账户执行本轮裁决（否则 4 个账户任务同时启动会重复跑）
+        static RAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if RAN.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
         }
-        let month_tag = today.format("%Y-%m").to_string();
-        {
-            let db = self.acct.lock().unwrap();
-            if db.meta_get("rule_cycle_month").ok().flatten().as_deref() == Some(month_tag.as_str()) {
-                return Ok(());
-            }
-        }
-        let stats = match self.acct.lock().unwrap().bucket_stats() {
-            Ok(v) if v.len() >= 2 => v,
-            _ => return Ok(()), // 数据不足，本轮跳过
-        };
-        // 当前规则（无则用中性 0.5）
-        let current = self
-            .acct
-            .lock()
-            .unwrap()
-            .meta_get("rule_pullback_share")
-            .ok()
-            .flatten()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(0.5);
-        // 候选规则集（只搜这一维：0.25 / 0.5 / 0.75）
-        let mut best = (current, f64::NEG_INFINITY, 0i64);
-        for share in [0.25, 0.5, 0.75] {
-            if let Some((s, exp, n)) = finbox_decision::screen::backtest_share(&stats, share) {
-                if exp > best.1 {
-                    best = (s, exp, n);
+        // 样本合并所有账户：同一套市场逻辑不该因账户历史不同而得出相反结论
+        let mut samples = Vec::new();
+        for name in crate::accounts::list_accounts(&self.cfg.data_dir)?.iter().map(|a| a.name.clone()).collect::<Vec<_>>() {
+            if let Ok(db) = crate::accounts::open_account(&self.cfg.data_dir, &name) {
+                if let Ok(mut v) = db.lock().unwrap().all_outcomes() {
+                    samples.append(&mut v);
                 }
             }
         }
-        let cur_exp = finbox_decision::screen::backtest_share(&stats, current)
-            .map(|(_, e, _)| e)
-            .unwrap_or(f64::NEG_INFINITY);
-        let (new_share, new_exp, n) = best;
-        let db = self.acct.lock().unwrap();
-        if new_share != current && new_exp > cur_exp + 0.3 {
-            // 改善超过 0.3%（D5 均值），才采纳——避免在噪声上反复横跳
-            db.meta_set("rule_pullback_share", &new_share.to_string())?;
-            db.meta_set("rule_cycle_month", &month_tag)?;
-            log::info!(
-                "[规则闭环] {} → {}（回测 D5 均值 {:+.2}% → {:+.2}%，{} 样本），已生效",
-                current, new_share, cur_exp, new_exp, n
-            );
-        } else {
-            db.meta_set("rule_cycle_month", &month_tag)?;
-            log::info!(
-                "[规则闭环] 保持 {}（最优候选 {} 仅改善 {:+.2}%，不足 0.3% 阈值，否决）",
-                current, new_share, new_exp - cur_exp
-            );
+        let n_total = samples.len();
+        let (last_ms, last_n) = {
+            let db = self.acct.lock().unwrap();
+            let get = |k: &str| db.meta_get(k).ok().flatten();
+            (
+                get("rule_cycle_ms").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0),
+                get("rule_cycle_n").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) as usize,
+            )
+        };
+        let now = chrono::Utc::now().timestamp_millis();
+        let due = last_ms == 0
+            || n_total.saturating_sub(last_n) >= 20
+            || now - last_ms >= 14 * 86_400_000;
+        if !due {
+            return Ok(());
+        }
+        // 当前四维参数
+        let cur = {
+            let db = self.acct.lock().unwrap();
+            let get = |k: &str, d: f64| {
+                db.meta_get(k).ok().flatten().and_then(|s| s.parse::<f64>().ok()).unwrap_or(d)
+            };
+            [
+                get("rule_pullback_share", 0.5),
+                get("rule_min_score", 0.0),
+                get("rule_volume_pref", 1.0),
+                get("rule_riskoff_position", 0.30),
+            ]
+        };
+        // 转成 rules::Outcome
+        let outs: Vec<finbox_decision::rules::Outcome> = samples
+            .iter()
+            .map(|(regime, ctype, score, vr, day_pct, ret)| finbox_decision::rules::Outcome {
+                regime: regime.clone(),
+                candidate_type: ctype.clone(),
+                score: *score,
+                volume_ratio: *vr,
+                day_pct: *day_pct,
+                ret_d5: *ret,
+            })
+            .collect();
+        let verdicts = finbox_decision::rules::search_all(&outs, cur);
+        // 规则写回**所有账户**（统一配置，避免各账户各自漂移）
+        let names: Vec<String> = crate::accounts::list_accounts(&self.cfg.data_dir)?
+            .iter().map(|a| a.name.clone()).collect();
+        for v in &verdicts {
+            log::info!("{}", v.log());
+            if !v.accept {
+                continue;
+            }
+            let key = format!("rule_{}", v.key);
+            for name in &names {
+                if let Ok(db) = crate::accounts::open_account(&self.cfg.data_dir, name) {
+                    if let Err(e) = db.lock().unwrap().meta_set(&key, &v.best.to_string()) {
+                        log::warn!("[规则闭环] {name} 写入 {key} 失败: {e}");
+                    }
+                }
+            }
+        }
+        // 周期标记也写全账户（避免每个账户各自触发）
+        for name in &names {
+            if let Ok(db) = crate::accounts::open_account(&self.cfg.data_dir, name) {
+                let db = db.lock().unwrap();
+                let _ = db.meta_set("rule_cycle_ms", &now.to_string());
+                let _ = db.meta_set("rule_cycle_n", &n_total.to_string());
+            }
         }
         Ok(())
     }

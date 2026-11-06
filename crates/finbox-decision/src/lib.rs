@@ -8,6 +8,7 @@
 mod context;
 pub mod llm;
 pub mod screen;
+pub mod rules;
 
 use finbox_core::OrderIntent;
 use finbox_store::{DecisionLog, SharedDb};
@@ -83,6 +84,32 @@ impl DecisionEngine {
             candidates.retain(|c| finbox_core::rules::board_allowed(initial, &c.thscode));
             if candidates.len() < before {
                 info!("板块权限过滤: {} → {} 只（初始资金 {:.0}万）", before, candidates.len(), initial / 10000.0);
+            }
+        }
+        // 规则闭环生效的候选过滤：最低评分 + 量比偏好（数据驱动，meta 可配）
+        {
+            let (min_score, vol_pref) = {
+                let a = self.acct.lock().unwrap();
+                (
+                    a.meta_get("rule_min_score").ok().flatten().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0),
+                    a.meta_get("rule_volume_pref").ok().flatten().and_then(|s| s.parse::<f64>().ok()).unwrap_or(1.0),
+                )
+            };
+            let before = candidates.len();
+            if min_score > 0.0 {
+                candidates.retain(|c| c.score >= min_score);
+            }
+            // 量比偏好：0=缩量(剔量比>2.5)；2=放量(剔量比<0.8)；1=中性不过滤
+            match vol_pref as i32 {
+                0 => candidates.retain(|c| c.volume_ratio.map(|v| v <= 2.5).unwrap_or(true)),
+                2 => candidates.retain(|c| c.volume_ratio.map(|v| v >= 0.8).unwrap_or(true)),
+                _ => {}
+            }
+            if candidates.len() < before {
+                info!(
+                    "规则过滤(评分≥{:.2}, 量比偏好{}): {} → {} 只",
+                    min_score, vol_pref as i32, before, candidates.len()
+                );
             }
         }
         // 可买性过滤：1 手成本超过“单票额度”的候选是废票（AI 决策额度不该浪费在买不起的票上）
