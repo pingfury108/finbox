@@ -272,6 +272,22 @@ impl Db {
         Ok((i, s))
     }
 
+    /// 某标的自某日起的后续日K收盘价（最多 n 根，日期升序）。
+    /// 决策特征的结果回填用（D+1/5/10 收盘收益）。
+    pub fn bars_since(&self, thscode: &str, from_ms: i64, n: usize) -> Result<Vec<f64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT close_price FROM daily_bars
+             WHERE thscode = ? AND date_ms >= ?
+             ORDER BY date_ms LIMIT ?",
+        )?;
+        let mut rows = stmt.query(duckdb::params![thscode, from_ms, n as i64])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push(r.get::<_, Option<f64>>(0)?.unwrap_or(0.0));
+        }
+        Ok(out)
+    }
+
     /// 市场涨跌家数：上涨家数 / 总家数（基于最新快照涨跌幅）。
     pub fn market_breadth(&self) -> Result<(u32, u32)> {
         let (up, total) = self.conn.query_row(

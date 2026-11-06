@@ -84,6 +84,24 @@ CREATE TABLE IF NOT EXISTS processed_adjustments (
     applied_ms INTEGER NOT NULL,
     PRIMARY KEY (thscode, ex_date_ms)
 );
+-- 决策特征库：每笔买入决策的结构化特征 + 未来收益（LLM 自我进化的数据地基）
+CREATE TABLE IF NOT EXISTS decision_features (
+    decision_id    INTEGER PRIMARY KEY,   -- 关联 decision_logs.id
+    ts_ms          INTEGER NOT NULL,
+    thscode        TEXT NOT NULL,
+    name           TEXT,
+    regime         TEXT,                  -- risk-on / neutral / risk-off
+    candidate_type TEXT,                  -- 强势型 / 回调型（无候选信息为 NULL）
+    score          REAL,                  -- 候选评分 0~1
+    day_pct        REAL,                  -- 当日涨幅 %
+    volume_ratio   REAL,
+    account_tier   TEXT,                  -- compact / standard
+    buy_price      REAL,                  -- 实际成交价（无成交用候选价）
+    ret_d1         REAL,                  -- 决策日收盘 vs 买价（%）
+    ret_d5         REAL,                  -- 第5交易日收盘 vs 买价（%）
+    ret_d10        REAL,
+    filled_ms      INTEGER                -- 结果回填时间（NULL=待回填）
+);
 "#;
 
 /// 账户库（SQLite）。
@@ -322,6 +340,95 @@ impl AccountDb {
     pub fn meta_del(&self, key: &str) -> Result<()> {
         self.conn.execute("DELETE FROM meta WHERE key = ?", rusqlite::params![key]).map_err(se)?;
         Ok(())
+    }
+
+    // ---------- 决策特征库（LLM 自我进化的数据地基） ----------
+
+    /// 写入一条买入决策特征（同 decision_id 覆盖）。
+    pub fn insert_decision_feature(
+        &self,
+        decision_id: i64,
+        ts_ms: i64,
+        thscode: &str,
+        name: &str,
+        regime: &str,
+        candidate_type: Option<&str>,
+        score: Option<f64>,
+        day_pct: Option<f64>,
+        volume_ratio: Option<f64>,
+        account_tier: &str,
+        buy_price: f64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO decision_features
+             (decision_id, ts_ms, thscode, name, regime, candidate_type, score, day_pct, volume_ratio, account_tier, buy_price)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(decision_id) DO UPDATE SET
+               ts_ms=excluded.ts_ms, thscode=excluded.thscode, name=excluded.name,
+               regime=excluded.regime, candidate_type=excluded.candidate_type,
+               score=excluded.score, day_pct=excluded.day_pct,
+               volume_ratio=excluded.volume_ratio, account_tier=excluded.account_tier,
+               buy_price=excluded.buy_price",
+            rusqlite::params![
+                decision_id, ts_ms, thscode, name, regime, candidate_type, score,
+                day_pct, volume_ratio, account_tier, buy_price
+            ],
+        ).map_err(se)?;
+        Ok(())
+    }
+
+    /// 一条待回填的买入决策（decision_id, ts_ms, thscode, buy_price, ret_d1）。
+    /// ret_d1 可能已填（只补 d5/d10）。
+    pub fn pending_decision_outcomes(&self) -> Result<Vec<(i64, i64, String, f64, Option<f64>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT decision_id, ts_ms, thscode, buy_price, ret_d1 FROM decision_features
+             WHERE filled_ms IS NULL AND buy_price > 0",
+        ).map_err(se)?;
+        let mut rows = stmt.query([]).map_err(se)?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next().map_err(se)? {
+            out.push((
+                r.get::<_, i64>(0).map_err(se)?,
+                r.get::<_, i64>(1).map_err(se)?,
+                r.get::<_, String>(2).map_err(se)?,
+                r.get::<_, f64>(3).map_err(se)?,
+                r.get::<_, Option<f64>>(4).map_err(se)?,
+            ))
+        }
+        Ok(out)
+    }
+
+    /// 回写决策的未来收益结果；全部到位时打 filled_ms 标记。
+    pub fn update_decision_outcome(
+        &self,
+        decision_id: i64,
+        ret_d1: Option<f64>,
+        ret_d5: Option<f64>,
+        ret_d10: Option<f64>,
+        complete: bool,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE decision_features SET
+               ret_d1 = COALESCE(ret_d1, ?),
+               ret_d5 = COALESCE(ret_d5, ?),
+               ret_d10 = COALESCE(ret_d10, ?),
+               filled_ms = CASE WHEN ? THEN ? ELSE filled_ms END
+             WHERE decision_id = ?",
+            rusqlite::params![
+                ret_d1, ret_d5, ret_d10, complete, chrono::Utc::now().timestamp_millis(), decision_id
+            ],
+        ).map_err(se)?;
+        Ok(())
+    }
+
+    /// 决策特征表是否为空（用于判断是否需要历史回补）。
+    pub fn decision_features_empty(&self) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM decision_features",
+            [],
+            |r| r.get(0),
+        ).map_err(se)?;
+        Ok(n == 0)
     }
 
     /// 测试辅助：把某标的的买入记录时间拨回 1 天（绕过 T+1 边界）。

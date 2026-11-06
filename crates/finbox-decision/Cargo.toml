@@ -8,6 +8,8 @@ license.workspace = true
 [dependencies]
 finbox-core = { path = "../finbox-core" }
 finbox-store = { path = "../finbox-store" }
+futures = "0.3"
+pi-ai = { git = "https://github.com/pingfury108/pi-rs", rev = "a7a31a1b4fa4a46a1e3eccfc7eb8e5edae173dc0" }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -1,37 +1,12 @@
-//! LLM 调用（OpenAI 兼容接口）与输出解析。
+//! LLM 调用（pi-ai 统一多 Provider 层）与输出解析。
+//!
+//! 用 pi-ai 替代手写 HTTP：内置指数退避重试、流式、多 Provider 可切换、
+//! token 用量统计。决策输出仍是 JSON 文本（由提示词约束 + parse 容错）。
 
 use finbox_core::{OrderIntent, OrderSide};
 use serde::{Deserialize, Serialize};
 
 use crate::{DecisionError, LlmConfig};
-
-#[derive(Serialize)]
-struct ChatRequest<'a> {
-    model: &'a str,
-    messages: Vec<Message<'a>>,
-    temperature: f64,
-}
-
-#[derive(Serialize)]
-struct Message<'a> {
-    role: &'a str,
-    content: &'a str,
-}
-
-#[derive(Deserialize)]
-struct ChatResponse {
-    choices: Vec<Choice>,
-}
-
-#[derive(Deserialize)]
-struct Choice {
-    message: ResponseMessage,
-}
-
-#[derive(Deserialize)]
-struct ResponseMessage {
-    content: String,
-}
 
 /// LLM 动作条目。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,43 +27,78 @@ pub struct ParsedOutput {
     pub comment: String,
 }
 
-/// 调用 OpenAI 兼容 chat completion。`system` 为系统提示词（按账户档位选择）。
+/// 调用 chat completion（pi-ai）。`system` 为系统提示词（按账户档位选择）。
 pub async fn chat(config: &LlmConfig, user: &str, system: &str) -> Result<String, DecisionError> {
-    let url = format!("{}/v1/chat/completions", config.base_url.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(std::time::Duration::from_secs(600))
-        .build()
-        .map_err(|e| DecisionError::Llm(e.to_string()))?;
+    use futures::StreamExt;
+    use pi_ai::{AssistantContent, AssistantMessageEvent, Context, LlmApi, Message, MessageContent, Model, Modality, OpenAICompletionsApi, StreamOptions, UserMessage};
 
-    let body = ChatRequest {
-        model: &config.model,
-        messages: vec![
-            Message { role: "system", content: system },
-            Message { role: "user", content: user },
-        ],
-        temperature: 0.2,
+    let api = OpenAICompletionsApi::with_http(
+        reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(600))
+            .build()
+            .map_err(|e| DecisionError::Llm(e.to_string()))?,
+    );
+    // pi-ai 的 URL = {base_url}/chat/completions；主流兼容端点在 /v1 下，
+    // 配置里没写 /v1 的自动补上（写了的尊重配置）
+    let base = config.base_url.trim_end_matches('/').to_string();
+    let base_url = if base.ends_with("/v1") { base } else { format!("{base}/v1") };
+
+    let model = Model {
+        id: config.model.clone(),
+        name: config.model.clone(),
+        api: "openai-completions".into(),
+        provider: "custom".into(),
+        base_url,
+        reasoning: false,
+        input: vec![Modality::Text],
+        cost: Default::default(),
+        context_window: 128_000,
+        max_tokens: 8_192,
+        sampling_params: None,
+        headers: None,
+        compat: None,
+    };
+    let ctx = Context {
+        system_prompt: Some(system.to_string()),
+        messages: vec![Message::User(UserMessage::new(MessageContent::text(user)))],
+        tools: None,
+    };
+    let opts = StreamOptions {
+        api_key: Some(config.api_key.clone()),
+        temperature: Some(0.2),
+        ..Default::default()
     };
 
-    let resp = client
-        .post(&url)
-        .bearer_auth(&config.api_key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| DecisionError::Llm(e.to_string()))?
-        .error_for_status()
-        .map_err(|e| DecisionError::Llm(e.to_string()))?;
-
-    let parsed: ChatResponse = resp
-        .json()
-        .await
-        .map_err(|e| DecisionError::Parse(e.to_string()))?;
-    parsed
-        .choices
-        .first()
-        .map(|c| c.message.content.clone())
-        .ok_or_else(|| DecisionError::Parse("无 choices".into()))
+    let mut stream = api.stream(&model, &ctx, opts);
+    let mut text = String::new();
+    let mut final_text = String::new();
+    let mut err_msg: Option<String> = None;
+    while let Some(ev) = stream.next().await {
+        match ev {
+            AssistantMessageEvent::TextDelta { delta, .. } => text.push_str(&delta),
+            AssistantMessageEvent::Done { message, .. } => {
+                for c in &message.content {
+                    if let AssistantContent::Text(t) = c {
+                        final_text.push_str(&t.text);
+                    }
+                }
+            }
+            AssistantMessageEvent::Error { error, .. } => {
+                err_msg = Some(error.error_message.clone().unwrap_or_else(|| "LLM 流错误".into()));
+            }
+            _ => {}
+        }
+    }
+    if let Some(e) = err_msg {
+        return Err(DecisionError::Llm(e));
+    }
+    // 少数 Provider 全文只在 Done 里：TextDelta 为空时回退
+    let out = if text.is_empty() { final_text } else { text };
+    if out.trim().is_empty() {
+        return Err(DecisionError::Llm("空回复".into()));
+    }
+    Ok(out)
 }
 
 /// 解析 LLM 原始输出（容忍 ```json 包裹）。

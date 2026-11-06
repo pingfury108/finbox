@@ -300,6 +300,70 @@ async fn industry_sync_loop(client: hithink_sdk::Client, market: SharedDb) -> an
     }
 }
 
+/// 从 context 文本中解析某只候选的特征行（历史回补用，尽力而为）。
+/// 行格式: "600488.SH 津药药业 现价 6.28, 涨幅 2.95%, 量比 1.8 | 入选: 强势型(0.73) | ..."
+struct ParsedCand {
+    regime: String,
+    ctype: Option<String>,
+    score: Option<f64>,
+    day_pct: Option<f64>,
+    volume_ratio: Option<f64>,
+    price: Option<f64>,
+}
+
+fn parse_candidate_line(context: &str, code: &str) -> Option<ParsedCand> {
+    let mut out = ParsedCand {
+        regime: "unknown".into(),
+        ctype: None,
+        score: None,
+        day_pct: None,
+        volume_ratio: None,
+        price: None,
+    };
+    // 大盘环境 → regime（涨N家/共M家）
+    for line in context.lines() {
+        if let Some(pos) = line.find("涨") {
+            let tail = &line[pos + 3..]; // 跳过 "涨"
+            if let (Some(n), Some(m)) = (
+                tail.split('家').next().and_then(|s| s.trim().parse::<f64>().ok()),
+                tail.split("共").nth(1).and_then(|s| s.split('家').next().and_then(|s| s.trim().parse::<f64>().ok())),
+            ) {
+                if m > 0.0 {
+                    let r = n / m;
+                    out.regime = if r >= 0.6 { "risk-on".into() } else if r >= 0.4 { "neutral".into() } else { "risk-off".into() };
+                }
+            }
+            break;
+        }
+    }
+    // 候选行 → 类型/评分/涨幅/量比/现价
+    for line in context.lines() {
+        if !line.starts_with(code) {
+            continue;
+        }
+        if let Some(t) = line.find("强势型(") {
+            out.ctype = Some("强势型".into());
+            out.score = line[t + 10..].split(')').next().and_then(|s| s.parse::<f64>().ok());
+        } else if let Some(t) = line.find("回调型(") {
+            out.ctype = Some("回调型".into());
+            out.score = line[t + 10..].split(')').next().and_then(|s| s.parse::<f64>().ok());
+        }
+        if let Some(t) = line.find("涨幅 ") {
+            out.day_pct = line[t + 9..].split('%').next().and_then(|s| s.trim().parse::<f64>().ok());
+        }
+        if let Some(t) = line.find("量比 ") {
+            let tail = &line[t + 9..];
+            let num: String = tail.chars().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-').collect();
+            out.volume_ratio = num.parse::<f64>().ok();
+        }
+        if let Some(t) = line.find("现价 ") {
+            out.price = line[t + 9..].split(',').next().and_then(|s| s.trim().parse::<f64>().ok());
+        }
+        return Some(out);
+    }
+    None
+}
+
 fn build_account_ctx(
     cfg: &Config,
     name: &str,
@@ -451,6 +515,10 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
         log::info!("[{}] 账户任务启动，开始监控", self.name);
         // 启动即应用待处理除权事件（分红/送股）
         self.apply_adjustments();
+        // 历史决策特征回补（一次性：特征表为空时从 decision_logs 解析）
+        if let Err(e) = self.backfill_decision_features_once().await {
+            log::warn!("[{}] 历史决策特征回补失败: {e}", self.name);
+        }
         let mut last_decision_min = 0i64;
         let mut last_adjust_date = String::new();
         // 固定决策时点（分钟）：开盘/午间/尾盘
@@ -499,6 +567,7 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
                 if minute >= 15 * 60 + 5 && minute < 15 * 60 + 15 && !self.closed_today {
                     self.review_old_decisions().await?;
                     self.snapshot_account().await?;
+                    self.backfill_decision_outcomes().await?;
                     self.closed_today = true;
                 }
                 if minute < 9 * 60 {
@@ -583,13 +652,16 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
         // 执行结果汇总：全部成交 → executed；有拒单 → rejected（追加原因）
         let mut filled = 0usize;
         let mut rejects: Vec<String> = Vec::new();
+        let mut buy_fills: Vec<(String, f64)> = Vec::new(); // (代码, 成交价) 供特征库用
         for intent in &result.intents {
             match intent.side {
                 finbox_core::OrderSide::Buy => {
-                    if let Some(r) = self.execute_buy(intent, report.max_total_pct).await? {
-                        rejects.push(r);
-                    } else {
-                        filled += 1;
+                    match self.execute_buy(intent, report.max_total_pct).await? {
+                        Ok(price) => {
+                            filled += 1;
+                            buy_fills.push((intent.thscode.clone(), price));
+                        }
+                        Err(r) => rejects.push(r),
                     }
                 }
                 finbox_core::OrderSide::Sell => {
@@ -619,6 +691,148 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
             if let Err(e) = self.acct.lock().unwrap().update_decision_status(result.log_id, st, note.as_deref()) {
                 log::warn!("[{}][决策] 回写执行状态失败: {e}", self.name);
             }
+            // 决策特征库：为每笔买入意图记录结构化特征（LLM 自我进化的数据地基）
+            self.record_decision_features(result.log_id, &report.regime, &conf, &result, &buy_fills);
+        }
+        Ok(())
+    }
+
+    /// 把本轮买入意图写入决策特征库（regime/候选类型/评分/量比/档位/价格）。
+    /// 成交的用成交价；被拒的用候选现价（被拒决策同样是学习数据）。
+    fn record_decision_features(
+        &self,
+        decision_id: i64,
+        regime: &str,
+        conf: &AcctConf,
+        result: &finbox_decision::DecisionResult,
+        buy_fills: &[(String, f64)],
+    ) {
+        let tier = if conf.initial_capital < COMPACT_TIER_CAPITAL { "compact" } else { "standard" };
+        for intent in &result.intents {
+            if intent.side != finbox_core::OrderSide::Buy {
+                continue;
+            }
+            let cand = result.candidates.iter().find(|c| c.thscode == intent.thscode);
+            let ctype = cand.map(|c| match c.reason.split('(').next().unwrap_or("") {
+                "回调型" => "回调型",
+                _ => "强势型",
+            });
+            let price = buy_fills.iter().find(|(c, _)| c == &intent.thscode)
+                .map(|(_, p)| *p)
+                .or(cand.map(|c| c.price))
+                .unwrap_or(0.0);
+            if price <= 0.0 {
+                continue; // 无价不记录（无法计算未来收益）
+            }
+            if let Err(e) = self.acct.lock().unwrap().insert_decision_feature(
+                decision_id,
+                chrono::Utc::now().timestamp_millis(),
+                &intent.thscode,
+                &intent.name,
+                regime,
+                ctype,
+                cand.map(|c| c.score),
+                cand.map(|c| c.pct),
+                cand.and_then(|c| c.volume_ratio),
+                tier,
+                price,
+            ) {
+                log::warn!("[{}][特征库] 写入失败: {e}", self.name);
+            }
+        }
+    }
+
+    /// 决策特征结果回填：对每笔待回填的买入决策，用日K收盘价计算 D+1/5/10 收益。
+    /// D1 = 决策日收盘（盘中买入，当日收盘即 D1）；D5/D10 = 第 5/10 个交易日收盘。
+    /// 需 ≥10 根后续日K 才算完成（打 filled 标记）。
+    async fn backfill_decision_outcomes(&self) -> anyhow::Result<()> {
+        let pending = self.acct.lock().unwrap().pending_decision_outcomes()?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let mut filled = 0usize;
+        for (decision_id, ts_ms, thscode, buy_price, have_d1) in pending {
+            // 决策日的 00:00（本地）作为日K查询起点
+            let day_start = chrono::DateTime::from_timestamp_millis(ts_ms)
+                .map(|t| t.with_timezone(&chrono::Local).date_naive())
+                .and_then(|d| d.and_hms_opt(0, 0, 0))
+                .and_then(|t| t.and_local_timezone(chrono::Local).single())
+                .map(|t| t.timestamp_millis())
+                .unwrap_or(ts_ms);
+            let bars = {
+                let m = self.market.lock().unwrap();
+                m.bars_since(&thscode, day_start, 11)? // D1..D10 需要 10 根
+            };
+            if bars.is_empty() {
+                continue;
+            }
+            let ret = |i: usize| -> Option<f64> {
+                bars.get(i).map(|close| (close / buy_price - 1.0) * 100.0)
+            };
+            let d1 = have_d1.or(ret(0));
+            let d5 = ret(4);
+            let d10 = ret(9);
+            let complete = d10.is_some();
+            self.acct.lock().unwrap().update_decision_outcome(decision_id, d1, d5, d10, complete)?;
+            if complete {
+                filled += 1;
+            }
+        }
+        if filled > 0 {
+            log::info!("[{}][特征库] 结果回填完成 {} 条", self.name, filled);
+        }
+        Ok(())
+    }
+
+    /// 历史决策特征回补（一次性）：从 decision_logs 的 actions/context 解析买入决策，
+    /// 价格从关联成交或候选行提取，特征从候选行文本解析。
+    async fn backfill_decision_features_once(&self) -> anyhow::Result<()> {
+        if !self.acct.lock().unwrap().decision_features_empty()? {
+            return Ok(()); // 已有数据，不重复回补
+        }
+        let logs = self.acct.lock().unwrap().recent_decision_logs(2000)?;
+        let initial = self.acct.lock().unwrap().get_or_init_account(0.0)?.initial_capital;
+        let tier = if initial < COMPACT_TIER_CAPITAL { "compact" } else { "standard" };
+        let mut n = 0usize;
+        for d in &logs {
+            let Ok(actions) = serde_json::from_str::<Vec<finbox_decision::llm::Action>>(&d.actions) else {
+                continue;
+            };
+            for a in &actions {
+                if a.action != "buy" {
+                    continue;
+                }
+                let code = finbox_core::rules::normalize_thscode(&a.symbol);
+                // 从 context 文本解析候选行特征（历史数据尽力而为）
+                let feat = parse_candidate_line(&d.context, &code);
+                // 成交价：优先关联成交，否则候选现价
+                let price = self
+                    .acct
+                    .lock()
+                    .unwrap()
+                    .trades_for_decision(d.id)?
+                    .iter()
+                    .find(|t| t.thscode == code && t.side == finbox_core::OrderSide::Buy)
+                    .map(|t| t.price)
+                    .or(feat.as_ref().and_then(|f| f.price))
+                    .unwrap_or(0.0);
+                if price <= 0.0 {
+                    continue;
+                }
+                let _ = self.acct.lock().unwrap().insert_decision_feature(
+                    d.id, d.ts_ms, &code, &code,
+                    feat.as_ref().map(|f| f.regime.as_str()).unwrap_or("unknown"),
+                    feat.as_ref().and_then(|f| f.ctype.as_deref()),
+                    feat.as_ref().and_then(|f| f.score),
+                    feat.as_ref().and_then(|f| f.day_pct),
+                    feat.as_ref().and_then(|f| f.volume_ratio),
+                    tier, price,
+                );
+                n += 1;
+            }
+        }
+        if n > 0 {
+            log::info!("[{}][特征库] 历史决策回补完成: {n} 条买入", self.name);
         }
         Ok(())
     }
@@ -628,23 +842,24 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
         self.risk.set_config(read_acct_conf(&self.cfg, &self.acct).risk);
     }
 
-    /// 执行买入：数量由系统按仓位约束计算。返回 Some(拒单原因) 表示未成交。
-    async fn execute_buy(&self, intent: &finbox_core::OrderIntent, max_total_pct: f64) -> anyhow::Result<Option<String>> {
+    /// 执行买入：数量由系统按仓位约束计算。
+    /// 返回 Ok(Ok(成交价)) = 成交；Ok(Err(拒单原因)) = 未成交。
+    async fn execute_buy(&self, intent: &finbox_core::OrderIntent, max_total_pct: f64) -> anyhow::Result<Result<f64, String>> {
         let qty = self.position_size(intent, max_total_pct).await;
         if qty < 100 {
             log::info!("[{}][决策] {} 仓位不足一手，跳过", self.name, intent.thscode);
-            return Ok(Some(format!("{} 仓位不足一手", intent.thscode)));
+            return Ok(Err(format!("{} 仓位不足一手", intent.thscode)));
         }
         let mut i = intent.clone();
         i.quantity = qty;
         match self.broker.submit(i.clone()).await {
             Ok(e) => {
                 log::info!("[{}][成交] 买入 {} {}股 @ {:.2}", self.name, e.intent.thscode, e.intent.quantity, e.price);
-                Ok(None)
+                Ok(Ok(e.price))
             }
             Err(e) => {
                 log::info!("[{}][拒单] 买入 {}: {e}", self.name, i.thscode);
-                Ok(Some(format!("{}: {e}", i.thscode)))
+                Ok(Err(format!("{}: {e}", i.thscode)))
             }
         }
     }

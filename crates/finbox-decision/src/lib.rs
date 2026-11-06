@@ -6,7 +6,7 @@
 //! 决策只产出意图，不触碰执行；执行交由 `finbox-trader::Broker`。
 
 mod context;
-mod llm;
+pub mod llm;
 mod screen;
 
 use finbox_core::OrderIntent;
@@ -37,6 +37,8 @@ pub struct DecisionResult {
     pub log_id: i64,
     /// LLM 原始输出
     pub raw_response: String,
+    /// 本轮候选（含类型/评分），供特征库归因
+    pub candidates: Vec<screen::Candidate>,
 }
 
 #[derive(Debug, Error)]
@@ -127,6 +129,7 @@ impl DecisionEngine {
                 note: "未配置 LLM_API_KEY".into(),
                 log_id: log,
                 raw_response: String::new(),
+                candidates: candidates.clone(),
             });
         }
 
@@ -145,6 +148,7 @@ impl DecisionEngine {
                     note,
                     log_id: log,
                     raw_response: String::new(),
+                    candidates: candidates.clone(),
                 });
             }
         };
@@ -161,6 +165,7 @@ impl DecisionEngine {
                     note,
                     log_id: log,
                     raw_response: raw,
+                    candidates: candidates.clone(),
                 });
             }
         };
@@ -187,6 +192,7 @@ impl DecisionEngine {
             note: format!("comment: {}", parsed.comment),
             log_id: log,
             raw_response: raw,
+            candidates: candidates.clone(),
         })
     }
 
