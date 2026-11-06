@@ -166,13 +166,50 @@ impl RiskManager {
         }
         let peak = self.current_peak();
 
-        let drawdown = if peak > 0.0 { (peak - total_asset) / peak } else { 0.0 };
+        let orig_drawdown = if peak > 0.0 { (peak - total_asset) / peak } else { 0.0 };
+        let mut drawdown = orig_drawdown;
         report.drawdown_pct = drawdown * 100.0;
-        let tier = tier_factor(drawdown);
+        let mut tier = tier_factor(drawdown);
 
-        // 深度熔断（≥8%）：清仓到 0% + 停买 + 等人工介入。
+        // 持仓提前读取（空仓自愈与持仓风控都要用）
+        let positions = self.acct.lock().unwrap().positions()?;
+
+        // 2.6 空仓自愈：分级仓位只对“持仓账户”有意义。空仓已是极限防御，
+        // 但小账户空仓后现金不变 → 回撤永不愈合 → ×15% 预算连一手都买不起
+        // → 恢复闭环断裂（僵尸状态）。空仓≥3天 → 重置峰值基准，重新出发。
+        if positions.is_empty() {
+            let now_ms2 = Utc::now().timestamp_millis();
+            let since = self.acct.lock().unwrap().meta_get("empty_since_ms")?;
+            match since.and_then(|s| s.parse::<i64>().ok()) {
+                None => {
+                    self.acct
+                        .lock()
+                        .unwrap()
+                        .meta_set("empty_since_ms", &now_ms2.to_string())?;
+                }
+                Some(t) if now_ms2 - t >= 3 * 86_400_000 => {
+                    self.acct.lock().unwrap().meta_set("peak_asset", &total_asset.to_string())?;
+                    self.update_peak(total_asset);
+                    self.acct.lock().unwrap().meta_del("empty_since_ms")?;
+                    // 重置后回撤归零，档位回到 ×100%（空仓状态本身已是极限防御）
+                    drawdown = 0.0;
+                    tier = 1.0;
+                    report.drawdown_pct = 0.0;
+                    log::info!(
+                        "[风控] 空仓超过 3 天，回撤基准重置为当前资产 {:.0}（原回撤 {:.1}%），重新出发",
+                        total_asset,
+                        orig_drawdown * 100.0
+                    );
+                }
+                Some(_) => {}
+            }
+        } else {
+            self.acct.lock().unwrap().meta_del("empty_since_ms")?;
+        }
+
+        // 深度熔断（≥硬熔断线，默认 8%）：清仓到 0% + 停买 + 等人工介入。
         // 不是“停几天”——策略可能真的坏了，此时该看的是人，不是时间。
-        // 空仓后现金不变、回撤不恢复 → 永不自动解除，需人工重置。
+        // （空仓≥3天的自愈重置已在上一步先行处理：重置后 drawdown=0 不会触发）
         if drawdown >= cfg.hard_stop_drawdown_pct {
             report.can_buy = false;
             report.max_total_pct = 0.0;
@@ -211,7 +248,6 @@ impl RiskManager {
         }
 
         // 3. 持仓风控（止损/止盈/超期）
-        let positions = self.acct.lock().unwrap().positions()?;
         for p in &positions {
             if let Some(sell) = self.check_position(p)? {
                 report.forced_sells.push(sell);
@@ -617,6 +653,32 @@ mod tests {
         assert_eq!(report.forced_sells[0].quantity, 300, "减 1/3");
         let report2 = rm.evaluate().unwrap();
         assert!(report2.forced_sells.is_empty(), "同一档不应重复减仓");
+    }
+
+    #[test]
+    fn empty_account_heals_drawdown_after_3_days() {
+        // 空仓小账户回撤 6.7%（×15% 档，预算买不起一手）→ 空仓≥3天自愈重置基准
+        let (market, acct, rm) = setup();
+        // 真空仓：只有现金，不插入持仓行（qty=0 的行也算持仓）
+        {
+            let a = acct.lock().unwrap();
+            a.get_or_init_account(10_000_000.0).unwrap();
+            a.set_account_cash(4_744.0).unwrap();
+            a.meta_set("peak_asset", "5084.55").unwrap();
+            // 空仓计时开始于 4 天前
+            let t = (chrono::Utc::now().timestamp_millis() - 4 * 86_400_000).to_string();
+            a.meta_set("empty_since_ms", &t).unwrap();
+        }
+
+        // 第一轮：重置基准，恢复买入，档位回 ×100%
+        let r = rm.evaluate().unwrap();
+        assert!(r.can_buy);
+        assert_eq!(r.drawdown_pct, 0.0, "自愈后回撤应归零");
+        let peak = acct.lock().unwrap().meta_get("peak_asset").unwrap().unwrap();
+        assert_eq!(peak.parse::<f64>().unwrap() as i64, 4744, "峰值应重置为当前资产");
+        // 第二轮：正常评估（不再重复重置）
+        let r2 = rm.evaluate().unwrap();
+        assert!(r2.can_buy);
     }
 
     #[test]
