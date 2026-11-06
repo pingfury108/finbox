@@ -7,7 +7,7 @@
 
 mod context;
 pub mod llm;
-mod screen;
+pub mod screen;
 
 use finbox_core::OrderIntent;
 use finbox_store::{DecisionLog, SharedDb};
@@ -223,6 +223,8 @@ impl DecisionEngine {
     /// 避免长时间持 std Mutex 阻塞 tokio worker，导致 Web 请求全部卡死）。
     async fn cached_screen(&self, candidate_count: usize) -> Result<Vec<crate::screen::Candidate>, DecisionError> {
         const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+        // 按账户真实战绩决定回调型配额（数据驱动：胜率高的类型多给位置）
+        let share = self.pullback_share();
         {
             let cache = self.screen_cache.lock().unwrap();
             if let Some((at, cands)) = &*cache {
@@ -234,13 +236,65 @@ impl DecisionEngine {
         let market = self.market.clone();
         let result = tokio::task::spawn_blocking(move || {
             let m = market.lock().unwrap();
-            screen::screen(&m, candidate_count)
+            screen::screen_with_share(&m, candidate_count, share)
         })
         .await
         .map_err(|e| DecisionError::Llm(format!("初筛任务失败: {e}")))?;
         let cands = result?;
         *self.screen_cache.lock().unwrap() = Some((std::time::Instant::now(), cands.clone()));
         Ok(cands)
+    }
+
+    /// 回调型配额占比：按历史战绩对比两类 D5 均值/胜率动态计算。
+    ///
+    /// 实测（2026-11 稳健A 109 样本）：回调型胜率 52-74%，强势型 13-25%。
+    /// 规则：
+    ///   - 两类样本各≥10 → 按表现差异调（差>2% 或胜率差>25% → 回调 0.75；反之 0.25）
+    ///   - 样本不足 → 保持中性 0.5（不拿噪声做决定）
+    ///   - meta `rule_pullback_share` 存在则优先（P4 规则闭环自动写入）
+    fn pullback_share(&self) -> f64 {
+        // P4 闭环生效的规则优先
+        if let Ok(Some(v)) = self.acct.lock().unwrap().meta_get("rule_pullback_share") {
+            if let Ok(share) = v.parse::<f64>() {
+                return share.clamp(0.0, 1.0);
+            }
+        }
+        let stats = match self.acct.lock().unwrap().bucket_stats() {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("[初筛] 战绩读取失败，用中性配额: {e}");
+                return 0.5;
+            }
+        };
+        let agg = |t: &str| -> (i64, f64, f64) {
+            let rows: Vec<_> = stats.iter().filter(|s| s.1 == t).collect();
+            let n: i64 = rows.iter().map(|s| s.2).sum();
+            if n == 0 {
+                return (0, 0.0, 0.0);
+            }
+            let avg = rows.iter().map(|s| s.3 * s.2 as f64).sum::<f64>() / n as f64;
+            let wr = rows.iter().map(|s| s.4 * s.2 as f64).sum::<f64>() / n as f64;
+            (n, avg, wr)
+        };
+        let (pn, pavg, pwr) = agg("回调型");
+        let (mn, mavg, mwr) = agg("强势型");
+        if pn < 10 || mn < 10 {
+            return 0.5;
+        }
+        let d_avg = pavg - mavg;
+        let d_wr = pwr - mwr;
+        let share = if d_avg > 2.0 || d_wr > 25.0 {
+            0.75
+        } else if d_avg < -2.0 || d_wr < -25.0 {
+            0.25
+        } else {
+            0.5
+        };
+        log::info!(
+            "[初筛] 战绩配额: 回调型 {}笔({pavg:+.2}%/{pwr:.0}%) vs 强势型 {}笔({mavg:+.2}%/{mwr:.0}%) → 回调占比 {:.0}%",
+            pn, mn, share * 100.0
+        );
+        share
     }
 
     fn log_decision(&self, ctx: &str, raw: &str, actions: &str, status: &str, note: &str) -> i64 {        let ts = chrono::Utc::now().timestamp_millis();

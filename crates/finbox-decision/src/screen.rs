@@ -53,8 +53,16 @@ const MAX_PCT_LIMIT: f64 = 9.5; // 非涨停（主板）
 /// 同一（一级）行业最多候选数
 const MAX_PER_INDUSTRY: usize = 2;
 
-/// 初筛：硬过滤 + 双池打分，输出两类型各半的候选。
+/// 初筛：硬过滤 + 双池打分，输出两类型按 `pullback_share` 分配的候选。
+///
+/// `pullback_share` 是回调型占比（0~1）：默认 0.5 两类各半；
+/// 实际由账户战绩动态调整（回调型胜率高则多出回调型）。
 pub fn screen(db: &Db, count: usize) -> finbox_store::Result<Vec<Candidate>> {
+    screen_with_share(db, count, 0.5)
+}
+
+/// 按回调型占比出候选。战绩好的类型多给位置。
+pub fn screen_with_share(db: &Db, count: usize, pullback_share: f64) -> finbox_store::Result<Vec<Candidate>> {
     let rows = db.market_screen_rows()?;
     let mut momentum: Vec<(f64, &ScreenRow)> = Vec::new();
     let mut pullback: Vec<(f64, &ScreenRow)> = Vec::new();
@@ -86,26 +94,24 @@ pub fn screen(db: &Db, count: usize) -> finbox_store::Result<Vec<Candidate>> {
     momentum.sort_by(by_score);
     pullback.sort_by(by_score);
 
-    // 两类各取一半，保证"强势 + 回调"都在池子里（去重：两池条件在 0~2% 区间会重叠）
-    let half = (count + 1) / 2;
+    // 按战绩调整的两类配额（去重：两池条件在 0~2% 区间会重叠）
+    let pb_quota = ((count as f64) * pullback_share.clamp(0.0, 1.0)).round() as usize;
+    let mo_quota = count.saturating_sub(pb_quota);
     let mut picked: Vec<(f64, &ScreenRow, Kind)> = Vec::new();
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for (sc, s) in momentum.iter().take(half) {
-        if seen.insert(s.thscode.as_str()) {
-            picked.push((*sc, s, Kind::Momentum));
-        }
-    }
-    for (sc, s) in pullback.iter() {
-        if picked.len() >= count {
-            break;
-        }
+    for (sc, s) in pullback.iter().take(pb_quota) {
         if seen.insert(s.thscode.as_str()) {
             picked.push((*sc, s, Kind::Pullback));
         }
     }
+    for (sc, s) in momentum.iter().take(mo_quota) {
+        if seen.insert(s.thscode.as_str()) {
+            picked.push((*sc, s, Kind::Momentum));
+        }
+    }
     // 某一类不足时用另一类补足到 count
     if picked.len() < count {
-        for (sc, s) in momentum.iter().skip(half).chain(pullback.iter()) {
+        for (sc, s) in pullback.iter().skip(pb_quota).chain(momentum.iter().skip(mo_quota)) {
             if picked.len() >= count {
                 break;
             }
@@ -285,5 +291,55 @@ mod tests {
         // 跌破 MA20 过多（-5%）→ 不是回调，是走坏
         let s = row(-3.0, -8.0, Some(0.6), 13.3, 14.0, 13.5, 0.2);
         assert!(score_pullback(&s).is_none());
+    }
+}
+
+/// 规则回测裁决：用历史决策特征评估「回调型配额 share」的期望收益。
+///
+/// 方法：把特征库里每笔买入按类型分组，按 share 计算组合期望
+///   E(share) = share × 回调型均值 + (1-share) × 强势型均值
+/// 返回 (share, 期望D5%, 样本数)。
+pub fn backtest_share(stats: &[(String, String, i64, f64, f64)], share: f64) -> Option<(f64, f64, i64)> {
+    let agg = |t: &str| -> (i64, f64) {
+        let rows: Vec<_> = stats.iter().filter(|s| s.1 == t).collect();
+        let n: i64 = rows.iter().map(|s| s.2).sum();
+        if n == 0 {
+            return (0, 0.0);
+        }
+        let avg = rows.iter().map(|s| s.3 * s.2 as f64).sum::<f64>() / n as f64;
+        (n, avg)
+    };
+    let (pn, pavg) = agg("回调型");
+    let (mn, mavg) = agg("强势型");
+    if pn < 10 || mn < 10 {
+        return None; // 样本不足，无法裁决
+    }
+    let exp = share * pavg + (1.0 - share) * mavg;
+    Some((share, exp, pn + mn))
+}
+
+#[cfg(test)]
+mod rule_tests {
+    use super::*;
+
+    fn stats(p_n: i64, p_avg: f64, m_n: i64, m_avg: f64) -> Vec<(String, String, i64, f64, f64)> {
+        vec![
+            ("risk-on".into(), "回调型".into(), p_n, p_avg, 60.0),
+            ("risk-on".into(), "强势型".into(), m_n, m_avg, 20.0),
+        ]
+    }
+
+    #[test]
+    fn backtest_favours_better_type() {
+        let s = stats(50, 1.2, 50, -3.2);
+        let (_, e_pb, _) = backtest_share(&s, 0.75).unwrap();
+        let (_, e_mo, _) = backtest_share(&s, 0.25).unwrap();
+        assert!(e_pb > e_mo, "回调型胜率高时应选高 share: {e_pb} vs {e_mo}");
+    }
+
+    #[test]
+    fn backtest_rejects_thin_samples() {
+        let s = stats(3, 1.0, 2, -1.0);
+        assert!(backtest_share(&s, 0.75).is_none(), "样本不足应拒绝裁决");
     }
 }

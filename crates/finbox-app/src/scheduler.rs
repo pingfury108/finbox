@@ -523,6 +523,10 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
         if let Err(e) = self.backfill_decision_outcomes().await {
             log::warn!("[{}] 历史决策结果回填失败: {e}", self.name);
         }
+        // P4 规则闭环（每月一次，数据驱动自动调参）
+        if let Err(e) = self.rule_cycle_if_due().await {
+            log::warn!("[{}] 规则闭环失败: {e}", self.name);
+        }
         let mut last_decision_min = 0i64;
         let mut last_adjust_date = String::new();
         // 固定决策时点（分钟）：开盘/午间/尾盘
@@ -837,6 +841,69 @@ impl AccountCtx {    /// 账户任务主循环：盘中持续监控。
         }
         if n > 0 {
             log::info!("[{}][特征库] 历史决策回补完成: {n} 条买入", self.name);
+        }
+        Ok(())
+    }
+
+    /// P4 规则闭环：月度执行一次。LLM 提出回调型配额建议 → 用特征库历史回测裁决。
+    /// 裁决改善则写入 meta `rule_pullback_share`（自动生效），否则否决并记录理由。
+    /// 安全边界：LLM 只能调这一个旋钮，不能改代码逻辑。
+    async fn rule_cycle_if_due(&self) -> anyhow::Result<()> {
+        use chrono::Datelike;
+        let today = chrono::Local::now();
+        // 每月 1-3 日且本月未执行
+        if today.day() > 3 {
+            return Ok(());
+        }
+        let month_tag = today.format("%Y-%m").to_string();
+        {
+            let db = self.acct.lock().unwrap();
+            if db.meta_get("rule_cycle_month").ok().flatten().as_deref() == Some(month_tag.as_str()) {
+                return Ok(());
+            }
+        }
+        let stats = match self.acct.lock().unwrap().bucket_stats() {
+            Ok(v) if v.len() >= 2 => v,
+            _ => return Ok(()), // 数据不足，本轮跳过
+        };
+        // 当前规则（无则用中性 0.5）
+        let current = self
+            .acct
+            .lock()
+            .unwrap()
+            .meta_get("rule_pullback_share")
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.5);
+        // 候选规则集（只搜这一维：0.25 / 0.5 / 0.75）
+        let mut best = (current, f64::NEG_INFINITY, 0i64);
+        for share in [0.25, 0.5, 0.75] {
+            if let Some((s, exp, n)) = finbox_decision::screen::backtest_share(&stats, share) {
+                if exp > best.1 {
+                    best = (s, exp, n);
+                }
+            }
+        }
+        let cur_exp = finbox_decision::screen::backtest_share(&stats, current)
+            .map(|(_, e, _)| e)
+            .unwrap_or(f64::NEG_INFINITY);
+        let (new_share, new_exp, n) = best;
+        let db = self.acct.lock().unwrap();
+        if new_share != current && new_exp > cur_exp + 0.3 {
+            // 改善超过 0.3%（D5 均值），才采纳——避免在噪声上反复横跳
+            db.meta_set("rule_pullback_share", &new_share.to_string())?;
+            db.meta_set("rule_cycle_month", &month_tag)?;
+            log::info!(
+                "[规则闭环] {} → {}（回测 D5 均值 {:+.2}% → {:+.2}%，{} 样本），已生效",
+                current, new_share, cur_exp, new_exp, n
+            );
+        } else {
+            db.meta_set("rule_cycle_month", &month_tag)?;
+            log::info!(
+                "[规则闭环] 保持 {}（最优候选 {} 仅改善 {:+.2}%，不足 0.3% 阈值，否决）",
+                current, new_share, new_exp - cur_exp
+            );
         }
         Ok(())
     }
