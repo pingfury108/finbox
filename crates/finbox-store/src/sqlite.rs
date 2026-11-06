@@ -421,6 +421,39 @@ impl AccountDb {
         Ok(())
     }
 
+    /// 分桶战绩：按（市场状态 × 候选类型）聚合已回填决策的 D5 均值与胜率。
+    /// 战绩注入的数据源（每周随真实成交滚动更新）。
+    pub fn bucket_stats(&self) -> Result<Vec<(String, String, i64, f64, f64)>> {
+        // 显式 CAST: SQLite 的 AVG/SUM 可能返回 Integer, rusqlite get::<f64> 会类型不匹配
+        let mut stmt = self.conn.prepare(
+            "SELECT regime, candidate_type, COUNT(*),
+                    CAST(AVG(ret_d5) AS REAL),
+                    CAST(SUM(CASE WHEN ret_d5 > 0 THEN 1 ELSE 0 END) AS REAL) * 100.0 / COUNT(*)
+             FROM decision_features
+             WHERE ret_d5 IS NOT NULL AND candidate_type IS NOT NULL
+             GROUP BY regime, candidate_type
+             ORDER BY AVG(ret_d5) DESC",
+        ).map_err(se)?;
+        let mut rows = stmt.query([]).map_err(se)?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next().map_err(se)? {
+            // 数字列用 get_ref 容错（SQLite 动态类型可能返回 Integer/Real）
+            let num = |i: usize| -> f64 {
+                r.get::<_, Option<f64>>(i).ok().flatten()
+                    .or_else(|| r.get::<_, Option<i64>>(i).ok().flatten().map(|v| v as f64))
+                    .unwrap_or(0.0)
+            };
+            out.push((
+                r.get::<_, String>(0).map_err(se)?,
+                r.get::<_, String>(1).map_err(se)?,
+                num(2) as i64,
+                num(3),
+                num(4),
+            ))
+        }
+        Ok(out)
+    }
+
     /// 决策特征表是否为空（用于判断是否需要历史回补）。
     pub fn decision_features_empty(&self) -> Result<bool> {
         let n: i64 = self.conn.query_row(

@@ -106,6 +106,39 @@ fn market_env_summary(market: &finbox_store::SharedDb) -> String {
 }
 
 /// 构建用户上下文文本。
+/// 战绩摘要：分桶统计（市场状态 × 候选类型）的 D5 均值与胜率，
+/// 按样本量/表现生成结论标注。这是“自我进化”的注入点——
+/// 数据每周随真实成交滚动更新，LLM 看到的是自己最近的真实战绩而非静态提示词。
+/// 样本不足（<8 笔）的桶不输出，避免噪声误导。
+pub fn stats_summary(stats: &[(String, String, i64, f64, f64)]) -> Option<String> {
+    let total: i64 = stats.iter().map(|s| s.2).sum();
+    if total < 8 {
+        return None; // 样本太少，注入反而是噪声
+    }
+    let mut lines = vec![
+        "== 历史战绩（你自己的真实成交统计，D5=买入后5个交易日收益）==".into(),
+        "候选类型 × 市场状态 | 样本 | D5均值 | 胜率 | 结论".into(),
+    ];
+    for (regime, ctype, n, avg, wr) in stats {
+        if *n < 8 {
+            continue; // 单桶样本不足不下结论
+        }
+        let verdict = if *avg > 0.5 && *wr >= 55.0 {
+            "✓ 表现好，优先此类机会"
+        } else if *avg < -0.5 || *wr <= 30.0 {
+            "✗ 表现差，此类机会严格回避"
+        } else {
+            "— 表现一般，正常对待"
+        };
+        lines.push(format!(
+            "{} × {}: {}笔, D5均值{avg:+.2}%, 胜率{wr:.0}% → {verdict}",
+            ctype, regime, n
+        ));
+    }
+    lines.push("决策时必须参考上表：优先进入 ✓ 标注的机会，✗ 标注的机会即使看起来诱人也要放弃".into());
+    Some(lines.join("\n"))
+}
+
 pub fn build_context(
     market: &finbox_store::SharedDb,
     acct: &finbox_store::SharedAccountDb,
@@ -114,15 +147,30 @@ pub fn build_context(
 ) -> finbox_store::Result<String> {
     let account = acct.lock().unwrap().get_or_init_account(0.0)?;
     let positions = acct.lock().unwrap().positions()?;
+    let stats = match acct.lock().unwrap().bucket_stats() {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("[上下文] 战绩统计读取失败: {e}");
+            Vec::new()
+        }
+    };
+    if stats.is_empty() {
+        log::info!("[上下文] 战绩统计为空（无已回填的 D5 数据或无候选类型）");
+    }
 
     let mut lines = vec![
         format!("可用现金: {:.2} 元", account.cash),
         String::new(),
-        "== 大盘环境 ==".into(),
-        market_env_summary(market),
-        String::new(),
-        "== 当前持仓 ==".into(),
     ];
+    // 历史战绩注入（自我进化核心：样本足够时才出现）
+    if let Some(s) = stats_summary(&stats) {
+        lines.push(s);
+        lines.push(String::new());
+    }
+    lines.push("== 大盘环境 ==".into());
+    lines.push(market_env_summary(market));
+    lines.push(String::new());
+    lines.push("== 当前持仓 ==".into());
 
     if positions.is_empty() {
         lines.push("（空仓）".into());
@@ -174,4 +222,29 @@ pub fn build_context(
     }
 
     Ok(lines.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stats_summary_requires_min_samples() {
+        let few = vec![("risk-on".to_string(), "回调型".to_string(), 3, 1.0, 60.0)];
+        assert!(stats_summary(&few).is_none(), "总样本<8 应返回 None");
+    }
+
+    #[test]
+    fn stats_summary_marks_verdicts() {
+        let stats = vec![
+            ("risk-on".to_string(), "回调型".to_string(), 23, 1.2, 74.0),
+            ("neutral".to_string(), "强势型".to_string(), 8, -4.0, 13.0),
+            ("neutral".to_string(), "回调型".to_string(), 5, 0.1, 50.0), // 单桶<8 不输出
+        ];
+        let s = stats_summary(&stats).unwrap();
+        assert!(s.contains("优先此类机会"));
+        assert!(s.contains("严格回避"));
+        assert!(!s.contains("5笔"), "单桶样本不足不应输出");
+        assert!(s.contains("23笔"));
+    }
 }
